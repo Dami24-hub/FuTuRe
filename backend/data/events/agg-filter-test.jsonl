@@ -1,12 +1,3 @@
-{"id":"1774403103067-l7bvaip59","aggregateId":"agg-filter-test","type":"Event1","version":1,"timestamp":"2026-03-25T01:45:03.067Z","metadata":{}}
-{"id":"1774403103072-dpkeflvw1","aggregateId":"agg-filter-test","type":"Event2","version":2,"timestamp":"2026-03-25T01:45:03.072Z","metadata":{}}
-{"id":"1774403103073-ke4nksyqo","aggregateId":"agg-filter-test","type":"Event3","version":3,"timestamp":"2026-03-25T01:45:03.073Z","metadata":{}}
-{"id":"1774403110546-6o955ckgd","aggregateId":"agg-filter-test","type":"Event1","version":1,"timestamp":"2026-03-25T01:45:10.546Z","metadata":{}}
-{"id":"1774403110547-xejsi7voe","aggregateId":"agg-filter-test","type":"Event2","version":2,"timestamp":"2026-03-25T01:45:10.547Z","metadata":{}}
-{"id":"1774403110547-jy719nxm9","aggregateId":"agg-filter-test","type":"Event3","version":3,"timestamp":"2026-03-25T01:45:10.547Z","metadata":{}}
-{"id":"1774403121436-etifwh8qn","aggregateId":"agg-filter-test","type":"Event1","version":1,"timestamp":"2026-03-25T01:45:21.436Z","metadata":{}}
-{"id":"1774403121437-hinpbngsb","aggregateId":"agg-filter-test","type":"Event2","version":2,"timestamp":"2026-03-25T01:45:21.437Z","metadata":{}}
-{"id":"1774403121437-symn7j4ev","aggregateId":"agg-filter-test","type":"Event3","version":3,"timestamp":"2026-03-25T01:45:21.437Z","metadata":{}}
-{"id":"1774403159498-if9hmfoc2","aggregateId":"agg-filter-test","type":"Event1","version":1,"timestamp":"2026-03-25T01:45:59.498Z","metadata":{}}
-{"id":"1774403159498-kaxzgt0lc","aggregateId":"agg-filter-test","type":"Event2","version":2,"timestamp":"2026-03-25T01:45:59.498Z","metadata":{}}
-{"id":"1774403159498-6dlg1zjns","aggregateId":"agg-filter-test","type":"Event3","version":3,"timestamp":"2026-03-25T01:45:59.498Z","metadata":{}}
+{"id":"1774403569156-l21ezeqt7","aggregateId":"agg-filter-test","type":"Event1","version":1,"timestamp":"2026-03-25T01:52:49.156Z","metadata":{}}
+{"id":"1774403569156-9mrha1h9d","aggregateId":"agg-filter-test","type":"Event2","version":2,"timestamp":"2026-03-25T01:52:49.156Z","metadata":{}}
+{"id":"1774403569156-qf1i1pnfv","aggregateId":"agg-filter-test","type":"Event3","version":3,"timestamp":"2026-03-25T01:52:49.156Z","metadata":{}}

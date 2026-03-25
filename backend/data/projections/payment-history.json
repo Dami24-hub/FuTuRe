@@ -1,67 +1,11 @@
 {
   "payments": [
     {
-      "aggregateId": "agg-1",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:43:24.628Z"
-    },
-    {
-      "aggregateId": "agg-1",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:43:52.827Z"
-    },
-    {
       "aggregateId": "agg-test-payment",
       "destination": "dest",
       "amount": "100",
       "hash": "hash123",
-      "timestamp": "2026-03-25T01:44:16.164Z"
-    },
-    {
-      "aggregateId": "agg-test-payment",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:44:33.691Z"
-    },
-    {
-      "aggregateId": "agg-test-payment",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:44:47.325Z"
-    },
-    {
-      "aggregateId": "agg-test-payment",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:45:03.083Z"
-    },
-    {
-      "aggregateId": "agg-test-payment",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:45:10.557Z"
-    },
-    {
-      "aggregateId": "agg-test-payment",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:45:21.447Z"
-    },
-    {
-      "aggregateId": "agg-test-payment",
-      "destination": "dest",
-      "amount": "100",
-      "hash": "hash123",
-      "timestamp": "2026-03-25T01:45:59.508Z"
+      "timestamp": "2026-03-25T01:52:49.166Z"
     }
   ]
 }

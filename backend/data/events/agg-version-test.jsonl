@@ -1,12 +1,2 @@
-{"id":"1774403073684-c6cz33srb","aggregateId":"agg-version-test","type":"AccountCreated","data":{"publicKey":"test-key"},"version":1,"timestamp":"2026-03-25T01:44:33.684Z","metadata":{}}
-{"id":"1774403073685-ai2zcaqf4","aggregateId":"agg-version-test","type":"PaymentSent","data":{"destination":"dest","amount":"50"},"version":2,"timestamp":"2026-03-25T01:44:33.685Z","metadata":{}}
-{"id":"1774403087322-ziq8fujc0","aggregateId":"agg-version-test","type":"AccountCreated","data":{"publicKey":"test-key"},"version":1,"timestamp":"2026-03-25T01:44:47.322Z","metadata":{}}
-{"id":"1774403087322-87dsbsv3e","aggregateId":"agg-version-test","type":"PaymentSent","data":{"destination":"dest","amount":"50"},"version":2,"timestamp":"2026-03-25T01:44:47.322Z","metadata":{}}
-{"id":"1774403103080-auadft3oz","aggregateId":"agg-version-test","type":"AccountCreated","data":{"publicKey":"test-key"},"version":1,"timestamp":"2026-03-25T01:45:03.080Z","metadata":{}}
-{"id":"1774403103080-735yog64g","aggregateId":"agg-version-test","type":"PaymentSent","data":{"destination":"dest","amount":"50"},"version":2,"timestamp":"2026-03-25T01:45:03.080Z","metadata":{}}
-{"id":"1774403110554-hzay64im0","aggregateId":"agg-version-test","type":"AccountCreated","data":{"publicKey":"test-key"},"version":1,"timestamp":"2026-03-25T01:45:10.554Z","metadata":{}}
-{"id":"1774403110554-h20vc8mom","aggregateId":"agg-version-test","type":"PaymentSent","data":{"destination":"dest","amount":"50"},"version":2,"timestamp":"2026-03-25T01:45:10.554Z","metadata":{}}
-{"id":"1774403121444-et6hwse0o","aggregateId":"agg-version-test","type":"AccountCreated","data":{"publicKey":"test-key"},"version":1,"timestamp":"2026-03-25T01:45:21.444Z","metadata":{}}
-{"id":"1774403121444-qe7pp1geh","aggregateId":"agg-version-test","type":"PaymentSent","data":{"destination":"dest","amount":"50"},"version":2,"timestamp":"2026-03-25T01:45:21.444Z","metadata":{}}
-{"id":"1774403159505-m7975l3e5","aggregateId":"agg-version-test","type":"AccountCreated","data":{"publicKey":"test-key"},"version":1,"timestamp":"2026-03-25T01:45:59.505Z","metadata":{}}
-{"id":"1774403159505-p45rbwplw","aggregateId":"agg-version-test","type":"PaymentSent","data":{"destination":"dest","amount":"50"},"version":2,"timestamp":"2026-03-25T01:45:59.505Z","metadata":{}}
+{"id":"1774403569163-klqc9hc32","aggregateId":"agg-version-test","type":"AccountCreated","data":{"publicKey":"test-key"},"version":1,"timestamp":"2026-03-25T01:52:49.163Z","metadata":{}}
+{"id":"1774403569163-u4zoom01c","aggregateId":"agg-version-test","type":"PaymentSent","data":{"destination":"dest","amount":"50"},"version":2,"timestamp":"2026-03-25T01:52:49.163Z","metadata":{}}
