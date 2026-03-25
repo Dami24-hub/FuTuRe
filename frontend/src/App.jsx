@@ -223,6 +223,13 @@ function App() {
           <QRCodeModal publicKey={account.publicKey} onClose={() => setShowQR(false)} />
         )}
       </AnimatePresence>
+
+      {/* QR Code Modal */}
+      <AnimatePresence>
+        {showQR && account && (
+          <QRCodeModal publicKey={account.publicKey} onClose={() => setShowQR(false)} />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
