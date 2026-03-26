@@ -9,8 +9,9 @@
     "test:performance": "vitest run tests/performance.benchmark.test.js",
     "load-test:regression": "k6 run load-tests/k6/scenarios/performance-regression.js",
     "load-test:endpoints": "k6 run load-tests/k6/scenarios/api-endpoints.js",
-    "load-test:concurrent": "k6 run load-tests/k6/scenarios/concurrent-users.js"
-    "test:integration": "vitest run tests/stellar.integration.test.js"
+    "load-test:concurrent": "k6 run load-tests/k6/scenarios/concurrent-users.js",
+    "test:integration": "vitest run tests/stellar.integration.test.js",
+    "test:db": "vitest run tests/database.framework.test.js"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.3.0",
