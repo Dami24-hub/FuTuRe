@@ -4,6 +4,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
+import logger from './config/logger.js';
+import { requestLogger } from './middleware/requestLogger.js';
 import stellarRoutes from './routes/stellar.js';
 import { initWebSocket } from './services/websocket.js';
 import eventsRoutes from './routes/events.js';
@@ -33,6 +35,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+app.use(requestLogger);
 
 // Initialize event sourcing
 await eventMonitor.initialize();
@@ -54,6 +57,5 @@ const httpServer = createServer(app);
 initWebSocket(httpServer);
 
 httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Network: ${process.env.STELLAR_NETWORK}`);
+  logger.info('server.started', { port: PORT, network: process.env.STELLAR_NETWORK });
 });
