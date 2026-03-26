@@ -13,6 +13,7 @@ import { QRCodeModal } from './components/QRCodeModal';
 import { NetworkBadge } from './components/NetworkBadge';
 import { StatusMessage } from './components/StatusMessage';
 import { logError } from './utils/errorLogger';
+import { ImportAccountForm } from './components/ImportAccountForm';
 
 const STATUS_COLORS = { connected: '#22c55e', disconnected: '#ef4444', reconnecting: '#f59e0b' };
 
@@ -34,8 +35,9 @@ function App() {
   const [loading, setLoading] = useState('');
   const [showQR, setShowQR] = useState(false);
 
-  const msg = useMessages();
+  const [showImportForm, setShowImportForm] = useState(false);
 
+  const msg = useMessages();
   const prefersReduced = useReducedMotion();
   const v = makeVariants(prefersReduced);
   const tap = tapScale(prefersReduced);
@@ -62,6 +64,19 @@ function App() {
     } catch (error) {
       logError(error, { context: 'createAccount' });
       msg.error(getFriendlyError(error), { retry: createAccount });
+    } finally { setLoading(''); }
+  };
+
+  const importAccount = async (secretKey) => {
+    setLoading('import');
+    try {
+      const { data } = await axios.post('/api/stellar/account/import', { secretKey });
+      setAccount(data);
+      setShowImportForm(false);
+      msg.success('Account imported successfully!');
+    } catch (error) {
+      logError(error, { context: 'importAccount' });
+      msg.error(getFriendlyError(error));
     } finally { setLoading(''); }
   };
 
@@ -121,9 +136,25 @@ function App() {
 
       {/* Create Account */}
       <motion.div className="section" variants={v.fadeSlide} initial="hidden" animate="visible">
-        <motion.button onClick={createAccount} {...tap} disabled={loading === 'create'}>
-          Create Account {loading === 'create' && <Spinner />}
-        </motion.button>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <motion.button onClick={createAccount} {...tap} disabled={loading === 'create'}>
+            Create Account {loading === 'create' && <Spinner />}
+          </motion.button>
+          <motion.button
+            onClick={() => setShowImportForm((v) => !v)}
+            {...tap}
+            style={{ background: '#6366f1' }}
+          >
+            {showImportForm ? 'Cancel Import' : 'Import Account'}
+          </motion.button>
+        </div>
+        <AnimatePresence>
+          {showImportForm && (
+            <motion.div variants={v.fadeSlide} initial="hidden" animate="visible" exit="exit">
+              <ImportAccountForm onImport={importAccount} loading={loading} />
+            </motion.div>
+          )}
+        </AnimatePresence>
         <AnimatePresence>
           {account && (
             <motion.div

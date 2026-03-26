@@ -22,6 +22,13 @@ export const rules = {
     .matches(STELLAR_PUBLIC_KEY)
     .withMessage('Invalid Stellar public key'),
 
+  importAccount: [
+    body('secretKey')
+      .trim()
+      .matches(STELLAR_SECRET_KEY)
+      .withMessage('Invalid Stellar secret key'),
+  ],
+
   sendPayment: [
     body('sourceSecret')
       .trim()
