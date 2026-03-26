@@ -105,6 +105,24 @@ export async function sendPayment(sourceSecret, destination, amount, assetCode =
   };
 }
 
+export async function getTransactionHistory(publicKey, { limit = 10, cursor } = {}) {
+  let call = server.transactions().forAccount(publicKey).limit(limit).order('desc');
+  if (cursor) call = call.cursor(cursor);
+  const result = await call.call();
+  return {
+    publicKey,
+    transactions: result.records.map(tx => ({
+      id: tx.id,
+      hash: tx.hash,
+      createdAt: tx.created_at,
+      successful: tx.successful,
+      ledger: tx.ledger_attr,
+      pagingToken: tx.paging_token,
+    })),
+    nextCursor: result.records.at(-1)?.paging_token ?? null,
+  };
+}
+
 export async function getExchangeRate(from, to) {
   // Placeholder - integrate with price oracle or DEX
   return 1.0;
