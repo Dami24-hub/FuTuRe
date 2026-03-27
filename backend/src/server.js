@@ -3,6 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
+import logger from './config/logger.js';
+import { requestLogger } from './middleware/requestLogger.js';
 import stellarRoutes from './routes/stellar.js';
 import multiSigRoutes from './routes/multiSig.js';
 import { initWebSocket } from './services/websocket.js';
@@ -12,10 +14,12 @@ import loadTestingRoutes from './routes/loadTesting.js';
 import chaosRoutes from './routes/chaos.js';
 import mobileRoutes from './routes/mobile.js';
 import webhookRoutes from './routes/webhooks.js';
+import metricsRoutes from './routes/metrics.js';
 import { eventMonitor } from './eventSourcing/index.js';
 import { auditLogger } from './security/index.js';
 import { getConfig } from './config/env.js';
 import { createRateLimiter } from './middleware/rateLimiter.js';
+import { performanceMiddleware } from './monitoring/middleware.js';
 
 dotenv.config();
 
@@ -34,9 +38,13 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+app.use(requestLogger);
 
 // Rate limiting
 app.use(createRateLimiter());
+
+// Performance monitoring
+app.use(performanceMiddleware);
 
 // Initialize event sourcing
 await eventMonitor.initialize();
@@ -52,6 +60,7 @@ app.use('/api/load-testing', loadTestingRoutes);
 app.use('/api/chaos', chaosRoutes);
 app.use('/api/mobile', mobileRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/metrics', metricsRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', network: getConfig().stellar.network });
@@ -61,10 +70,5 @@ const httpServer = createServer(app);
 initWebSocket(httpServer);
 
 httpServer.listen(PORT, () => {
-  const { stellar, meta } = getConfig();
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Network: ${stellar.network}`);
-  if (meta.loadedEnvFiles.length > 0) {
-    console.log(`Env files: ${meta.loadedEnvFiles.map(p => p.split('/').pop()).join(', ')}`);
-  }
+  logger.info('server.started', { port: PORT, network: process.env.STELLAR_NETWORK });
 });

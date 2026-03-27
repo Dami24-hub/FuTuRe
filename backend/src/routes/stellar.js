@@ -37,6 +37,18 @@ router.post('/account/create', async (req, res) => {
   }
 });
 
+router.post('/account/import', rules.importAccount, validate, async (req, res) => {
+  try {
+    const { secretKey } = req.body;
+    const keypair = StellarSDK.Keypair.fromSecret(secretKey);
+    const publicKey = keypair.publicKey();
+    const balance = await StellarService.getBalance(publicKey);
+    res.json({ publicKey, secretKey, balances: balance.balances });
+  } catch (error) {
+    res.status(400).json({ error: 'Invalid secret key or account not found on network' });
+  }
+});
+
 /**
  * @swagger
  * /api/stellar/account/{publicKey}:
@@ -165,6 +177,30 @@ router.post('/payment/send', rules.sendPayment, validate, async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
+router.get('/account/:publicKey/transactions', rules.publicKeyParam, validate, async (req, res) => {
+  try {
+    const { cursor, limit, type, dateFrom, dateTo } = req.query;
+    const result = await StellarService.getTransactions(req.params.publicKey, {
+      cursor,
+      limit: limit ? Math.min(parseInt(limit), 50) : 10,
+      type,
+      dateFrom,
+      dateTo,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/fee-stats', async (req, res) => {
+  try {
+    res.json(await StellarService.getFeeStats());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/exchange-rate/:from/:to', rules.assetCodeParams, validate, async (req, res) => {
   try {
     const rate = await StellarService.getExchangeRate(req.params.from, req.params.to);
