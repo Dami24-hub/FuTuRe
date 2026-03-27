@@ -16,7 +16,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest --ui",
-    "test:parallel": "vitest run --workers 4"
+    "test:parallel": "vitest run --workers 4",
+    "test:mobile": "cd mobile-tests && node run-tests.js"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "6.9.1",
