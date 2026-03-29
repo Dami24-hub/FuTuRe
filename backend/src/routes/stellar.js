@@ -7,6 +7,8 @@ import { broadcastToAccount } from '../services/websocket.js';
 import { validate, rules } from '../middleware/validate.js';
 import { SUPPORTED_ASSETS, getIssuer } from '../config/assets.js';
 import { dispatchEvent } from '../webhooks/dispatcher.js';
+import { cacheMiddleware } from '../middleware/cache.js';
+import { keys as cacheKeys, TTL, invalidateBalance } from '../cache/appCache.js';
 
 const router = express.Router();
 
@@ -82,14 +84,17 @@ router.post('/account/import', rules.importAccount, validate, async (req, res) =
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/account/:publicKey', rules.publicKeyParam, validate, async (req, res) => {
-  try {
-    const balance = await StellarService.getBalance(req.params.publicKey);
-    res.json(balance);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+router.get('/account/:publicKey', rules.publicKeyParam, validate,
+  cacheMiddleware(TTL.BALANCE, (req) => cacheKeys.balance(req.params.publicKey)),
+  async (req, res) => {
+    try {
+      const balance = await StellarService.getBalance(req.params.publicKey);
+      res.json(balance);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   }
-});
+);
 
 /**
  * @swagger
@@ -132,6 +137,10 @@ router.post('/payment/send', rules.sendPayment, validate, async (req, res) => {
     const senderBalance = await StellarService.getBalance(senderKey);
     broadcastToAccount(senderKey, { ...notification, direction: 'sent', balance: senderBalance.balances });
     dispatchEvent(senderKey, 'payment_sent', { hash: result.hash, amount, assetCode: assetCode || 'XLM', destination });
+
+    // Invalidate cached balances for sender and recipient
+    await invalidateBalance(senderKey);
+    await invalidateBalance(destination);
 
     // Notify recipient of incoming tx + updated balance
     try {
@@ -196,7 +205,7 @@ router.get('/account/:publicKey/transactions', rules.publicKeyParam, validate, a
   }
 });
 
-router.get('/fee-stats', async (req, res) => {
+router.get('/fee-stats', cacheMiddleware(TTL.FEE_STATS, () => cacheKeys.feeStats()), async (req, res) => {
   try {
     res.json(await StellarService.getFeeStats());
   } catch (error) {
@@ -204,15 +213,18 @@ router.get('/fee-stats', async (req, res) => {
   }
 });
 
-router.get('/exchange-rate/:from/:to', rules.assetCodeParams, validate, async (req, res) => {
-  try {
-    const { from, to } = req.params;
-    const rate = await getRate(from, to);
-    res.json({ from, to, rate });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+router.get('/exchange-rate/:from/:to', rules.assetCodeParams, validate,
+  cacheMiddleware(TTL.RATE, (req) => cacheKeys.rate(req.params.from, req.params.to)),
+  async (req, res) => {
+    try {
+      const { from, to } = req.params;
+      const rate = await getRate(from, to);
+      res.json({ from, to, rate });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   }
-});
+);
 
 // All supported pair rates in one call
 router.get('/rates', async (req, res) => {
