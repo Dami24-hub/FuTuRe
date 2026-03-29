@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Spinner } from './Spinner';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 const TYPE_LABELS = { payment: 'Payment', create_account: 'Account Created', unknown: 'Other' };
 const PAGE_SIZE = 10;
@@ -13,14 +14,20 @@ function fmt(dateStr) {
 function TxRow({ tx, onClick }) {
   const isReceived = tx.direction === 'received';
   const isSent = tx.direction === 'sent';
+  const label = `${TYPE_LABELS[tx.type] ?? tx.type}, ${tx.direction ?? ''}, ${tx.amount ? `${tx.amount} ${tx.asset ?? 'XLM'}` : ''}, ${fmt(tx.date)}, ${tx.successful ? 'successful' : 'failed'}`;
+
   return (
     <motion.div
       className="tx-row"
       onClick={() => onClick(tx)}
+      onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onClick(tx)}
       whileTap={{ scale: 0.98 }}
       layout
+      role="button"
+      tabIndex={0}
+      aria-label={label}
     >
-      <span className={`tx-dir ${isReceived ? 'tx-in' : isSent ? 'tx-out' : 'tx-neutral'}`}>
+      <span className={`tx-dir ${isReceived ? 'tx-in' : isSent ? 'tx-out' : 'tx-neutral'}`} aria-hidden="true">
         {isReceived ? '↓' : isSent ? '↑' : '•'}
       </span>
       <span className="tx-type">{TYPE_LABELS[tx.type] ?? tx.type}</span>
@@ -28,7 +35,7 @@ function TxRow({ tx, onClick }) {
         {tx.amount ? `${tx.amount} ${tx.asset ?? ''}` : '—'}
       </span>
       <span className="tx-date">{fmt(tx.date)}</span>
-      <span className={`tx-status ${tx.successful ? 'tx-ok' : 'tx-fail'}`}>
+      <span className={`tx-status ${tx.successful ? 'tx-ok' : 'tx-fail'}`} aria-hidden="true">
         {tx.successful ? '✓' : '✗'}
       </span>
     </motion.div>
@@ -36,18 +43,36 @@ function TxRow({ tx, onClick }) {
 }
 
 function TxModal({ tx, onClose }) {
+  const modalRef = useRef(null);
+  useFocusTrap(modalRef, true);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
-    <motion.div className="tx-overlay" onClick={onClose} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+    <motion.div
+      className="tx-overlay"
+      onClick={onClose}
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      aria-hidden="true"
+    >
       <motion.div
+        ref={modalRef}
         className="tx-modal"
         onClick={e => e.stopPropagation()}
         initial={{ scale: 0.9, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.9, opacity: 0 }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tx-modal-title"
       >
         <div className="tx-modal-header">
-          <h3>Transaction Details</h3>
-          <button className="qr-close" onClick={onClose}>✕</button>
+          <h3 id="tx-modal-title">Transaction Details</h3>
+          <button className="qr-close" onClick={onClose} aria-label="Close transaction details dialog">✕</button>
         </div>
         <dl className="tx-detail-list">
           <dt>Hash</dt><dd className="tx-hash">{tx.hash}</dd>
@@ -72,7 +97,7 @@ export function TransactionHistory({ publicKey }) {
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState(null);
   const [filters, setFilters] = useState({ type: '', dateFrom: '', dateTo: '' });
-  const [cursors, setCursors] = useState([]); // stack for back-pagination
+  const [cursors, setCursors] = useState([]);
 
   const fetchPage = useCallback(async (cursor = null, isBack = false) => {
     setLoading(true);
@@ -81,20 +106,13 @@ export function TransactionHistory({ publicKey }) {
       if (filters.type) params.type = filters.type;
       if (filters.dateFrom) params.dateFrom = filters.dateFrom;
       if (filters.dateTo) params.dateTo = filters.dateTo;
-
       const { data } = await axios.get(`/api/stellar/account/${publicKey}/transactions`, { params });
       setTxs(data.records);
       setNextCursor(data.nextCursor);
       setLoaded(true);
-
-      if (!isBack && cursor) {
-        setCursors(prev => [...prev, cursor]);
-      }
-    } catch (e) {
-      // errors handled by parent via StatusMessage
-    } finally {
-      setLoading(false);
-    }
+      if (!isBack && cursor) setCursors(prev => [...prev, cursor]);
+    } catch { /* errors handled by parent */ }
+    finally { setLoading(false); }
   }, [publicKey, filters]);
 
   const handleLoad = () => { setCursors([]); fetchPage(null); };
@@ -104,31 +122,51 @@ export function TransactionHistory({ publicKey }) {
     setCursors(c => c.slice(0, -1));
     fetchPage(prev, true);
   };
-
-  const applyFilters = (e) => {
-    e.preventDefault();
-    setCursors([]);
-    fetchPage(null);
-  };
+  const applyFilters = (e) => { e.preventDefault(); setCursors([]); fetchPage(null); };
 
   return (
-    <div className="section">
+    <section className="section" aria-labelledby="tx-history-heading">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <h3>Transaction History</h3>
-        <motion.button className="tx-load-btn" onClick={handleLoad} disabled={loading} whileTap={{ scale: 0.97 }}>
-          {loading ? <Spinner /> : loaded ? '↺ Refresh' : 'Load History'}
+        <h3 id="tx-history-heading">Transaction History</h3>
+        <motion.button
+          className="tx-load-btn"
+          onClick={handleLoad}
+          disabled={loading}
+          whileTap={{ scale: 0.97 }}
+          aria-label={loaded ? 'Refresh transaction history' : 'Load transaction history'}
+        >
+          {loading ? <Spinner label="Loading transactions…" /> : loaded ? '↺ Refresh' : 'Load History'}
         </motion.button>
       </div>
 
-      {/* Filters */}
-      <form className="tx-filters" onSubmit={applyFilters}>
-        <select value={filters.type} onChange={e => setFilters(f => ({ ...f, type: e.target.value }))}>
+      <form className="tx-filters" onSubmit={applyFilters} aria-label="Filter transactions">
+        <label htmlFor="tx-type-filter" className="sr-only">Transaction type</label>
+        <select
+          id="tx-type-filter"
+          value={filters.type}
+          onChange={e => setFilters(f => ({ ...f, type: e.target.value }))}
+          aria-label="Filter by transaction type"
+        >
           <option value="">All types</option>
           <option value="payment">Payment</option>
           <option value="create_account">Account Created</option>
         </select>
-        <input type="date" value={filters.dateFrom} onChange={e => setFilters(f => ({ ...f, dateFrom: e.target.value }))} placeholder="From" />
-        <input type="date" value={filters.dateTo} onChange={e => setFilters(f => ({ ...f, dateTo: e.target.value }))} placeholder="To" />
+        <label htmlFor="tx-date-from" className="sr-only">From date</label>
+        <input
+          id="tx-date-from"
+          type="date"
+          value={filters.dateFrom}
+          onChange={e => setFilters(f => ({ ...f, dateFrom: e.target.value }))}
+          aria-label="Filter from date"
+        />
+        <label htmlFor="tx-date-to" className="sr-only">To date</label>
+        <input
+          id="tx-date-to"
+          type="date"
+          value={filters.dateTo}
+          onChange={e => setFilters(f => ({ ...f, dateTo: e.target.value }))}
+          aria-label="Filter to date"
+        />
         <button type="submit" className="tx-filter-btn">Filter</button>
       </form>
 
@@ -136,16 +174,16 @@ export function TransactionHistory({ publicKey }) {
         {loaded && (
           <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             {txs.length === 0 ? (
-              <p className="tx-empty">No transactions found.</p>
+              <p className="tx-empty" role="status">No transactions found.</p>
             ) : (
               <>
-                <div className="tx-list">
+                <div className="tx-list" role="list" aria-label="Transactions">
                   {txs.map(tx => <TxRow key={tx.id} tx={tx} onClick={setSelected} />)}
                 </div>
-                <div className="tx-pagination">
-                  <button onClick={handleBack} disabled={cursors.length === 0 || loading} className="tx-page-btn">← Prev</button>
-                  <button onClick={handleNext} disabled={!nextCursor || loading} className="tx-page-btn">Next →</button>
-                </div>
+                <nav className="tx-pagination" aria-label="Transaction page navigation">
+                  <button onClick={handleBack} disabled={cursors.length === 0 || loading} className="tx-page-btn" aria-label="Previous page">← Prev</button>
+                  <button onClick={handleNext} disabled={!nextCursor || loading} className="tx-page-btn" aria-label="Next page">Next →</button>
+                </nav>
               </>
             )}
           </motion.div>
@@ -155,6 +193,6 @@ export function TransactionHistory({ publicKey }) {
       <AnimatePresence>
         {selected && <TxModal tx={selected} onClose={() => setSelected(null)} />}
       </AnimatePresence>
-    </div>
+    </section>
   );
 }
