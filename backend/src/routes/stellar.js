@@ -48,7 +48,7 @@ router.post('/account/import', rules.importAccount, validate, async (req, res) =
     const keypair = StellarSDK.Keypair.fromSecret(secretKey);
     const publicKey = keypair.publicKey();
     const balance = await StellarService.getBalance(publicKey);
-    res.json({ publicKey, secretKey, balances: balance.balances });
+    res.json({ publicKey, balances: balance.balances });
   } catch (error) {
     res.status(400).json({ error: 'Invalid secret key or account not found on network' });
   }
