@@ -29,13 +29,10 @@ import { useAppState, useAppDispatch, A } from './store/index.js';
 const STATUS_COLORS = { connected: '#22c55e', disconnected: '#ef4444', reconnecting: '#f59e0b' };
 const TIMEOUT_MS = 30000;
 
-function withTimeout(promise) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Request timed out. Please try again.')), TIMEOUT_MS)
-    ),
-  ]);
+function withTimeout(promiseFn) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  return promiseFn(controller.signal).finally(() => clearTimeout(timer));
 }
 
 function App() {
@@ -145,6 +142,8 @@ function App() {
 
   const createAccount = async () => {
     try {
+      const { data } = await withTimeout(signal => axios.post('/api/stellar/account/create', null, { signal }));
+      setAccount(data);
       const { data } = await withTimeout(axios.post('/api/stellar/account/create'));
       dispatch({ type: A.SET_ACCOUNT, payload: data });
       resetForm();
@@ -172,6 +171,8 @@ function App() {
     if (!account) return;
     setLoading('balance');
     try {
+      const { data } = await withTimeout(signal => axios.get(`/api/stellar/account/${account.publicKey}`, { signal }));
+      setBalance(data);
       const { data } = await withTimeout(axios.get(`/api/stellar/account/${account.publicKey}`));
       dispatch({ type: A.SET_BALANCE, payload: data });
     } catch (error) {
@@ -203,6 +204,7 @@ function App() {
     }
 
     try {
+      const { data } = await withTimeout(signal => axios.post('/api/stellar/payment/send', payload, { signal }));
       const { data } = await withTimeout(axios.post('/api/stellar/payment/send', payload));
       msg.success(`Payment sent! Hash: ${data.hash}`);
       resetForm();
