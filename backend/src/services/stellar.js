@@ -107,11 +107,11 @@ export async function getBalance(publicKey) {
   return { publicKey, balances };
 }
 
-export async function sendPayment(sourceSecret, destination, amount, assetCode = 'XLM', memo = null) {
+export async function sendPayment(sourceSecret, destination, amount, assetCode = 'XLM', memo = null, memoType = 'text') {
   const { assetIssuer } = getConfig().stellar;
   const sourceKeypair = StellarSDK.Keypair.fromSecret(sourceSecret);
   const sourcePublicKey = sourceKeypair.publicKey();
-  logger.info('stellar.sendPayment.start', { source: sourcePublicKey, destination, amount, assetCode, memo });
+  logger.info('stellar.sendPayment.start', { source: sourcePublicKey, destination, amount, assetCode, memo, memoType });
 
   const sourceAccount = await getHorizonServer().loadAccount(sourcePublicKey);
   
@@ -136,7 +136,10 @@ export async function sendPayment(sourceSecret, destination, amount, assetCode =
     }));
 
   if (memo) {
-    txBuilder.addMemo(StellarSDK.Memo.text(memo));
+    const stellarMemo = memoType === 'id'
+      ? StellarSDK.Memo.id(memo)
+      : StellarSDK.Memo.text(memo);
+    txBuilder.addMemo(stellarMemo);
   }
 
   const transaction = txBuilder.setTimeout(30).build();
@@ -184,11 +187,12 @@ export async function sendPayment(sourceSecret, destination, amount, assetCode =
     ledger: result.ledger,
     feeBump: usedFeeBump,
     memo,
+    memoType,
   });
 
   await eventMonitor.publishEvent(sourcePublicKey, {
     type: 'PaymentSent',
-    data: { destination, amount, hash: result.hash, feeBump: usedFeeBump, memo },
+    data: { destination, amount, hash: result.hash, feeBump: usedFeeBump, memo, memoType },
     version: 1
   });
 
@@ -207,6 +211,8 @@ export async function sendPayment(sourceSecret, destination, amount, assetCode =
         successful: result.successful,
         senderId: sender.id,
         recipientId: recipient.id,
+        memo: memo ?? null,
+        memoType: memo ? (memoType || 'text') : null,
       },
     });
   }).catch(err => logger.warn('db.transaction.save.failed', { error: err.message }));
