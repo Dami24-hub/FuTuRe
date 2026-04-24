@@ -42,6 +42,16 @@ router.post('/account/create', async (req, res) => {
   }
 });
 
+router.post('/account/fund', rules.publicKeyBody, validate, async (req, res) => {
+  if (!StellarService.isTestnet()) return res.status(403).json({ error: 'Only available on testnet' });
+  try {
+    const result = await StellarService.fundAccount(req.body.publicKey);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.post('/account/import', rules.importAccount, validate, async (req, res) => {
   try {
     const { secretKey } = req.body;

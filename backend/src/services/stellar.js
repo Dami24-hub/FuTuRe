@@ -48,8 +48,16 @@ function getHorizonServer() {
   return horizonServer;
 }
 
-function isTestnet() {
+export function isTestnet() {
   return getConfig().stellar.network === 'testnet';
+}
+
+export async function fundAccount(publicKey) {
+  if (!isTestnet()) throw new Error('Only available on testnet');
+  const res = await fetch(`https://friendbot.stellar.org?addr=${publicKey}`);
+  if (!res.ok) throw new Error(`Friendbot funding failed: ${res.status} ${res.statusText}`);
+  logger.debug('stellar.friendbotFunded', { publicKey });
+  return { funded: true, publicKey };
 }
 
 export async function createAccount() {
