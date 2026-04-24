@@ -23,6 +23,12 @@ class KYCCollector {
     const missing = required.filter(f => !data[f]);
     if (missing.length) throw new Error(`Missing required KYC fields: ${missing.join(', ')}`);
 
+    // Validate dateOfBirth is a valid date
+    const dob = new Date(data.dateOfBirth);
+    if (isNaN(dob.getTime())) {
+      throw new Error('dateOfBirth must be a valid date');
+    }
+
     const record = {
       userId,
       status: KYC_STATUS.PENDING,
@@ -30,7 +36,7 @@ class KYCCollector {
       updatedAt: new Date().toISOString(),
       data: {
         fullName: data.fullName,
-        dateOfBirth: data.dateOfBirth,
+        dateOfBirth: dob.toISOString(),
         nationality: data.nationality,
         documentType: data.documentType,   // PASSPORT | NATIONAL_ID | DRIVERS_LICENSE
         documentNumber: data.documentNumber,
