@@ -105,7 +105,7 @@ export async function createAccount() {
 
   await eventMonitor.publishEvent(publicKey, {
     type: 'AccountCreated',
-    data: { publicKey, secretKey: pair.secret() },
+    data: { publicKey },
     version: 1
   });
 
