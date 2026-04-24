@@ -26,9 +26,10 @@ export function wrapWithFeeBump(innerTx, feeAccountSecret) {
     ? StellarSDK.Networks.TESTNET
     : StellarSDK.Networks.PUBLIC;
 
+  const multiplier = parseInt(process.env.FEE_BUMP_MULTIPLIER ?? '10', 10);
   const feeBumpTx = StellarSDK.TransactionBuilder.buildFeeBumpTransaction(
     feeKeypair,
-    StellarSDK.BASE_FEE * 10, // fee bump pays 10x base fee
+    StellarSDK.BASE_FEE * multiplier,
     innerTx,
     networkPassphrase
   );
@@ -161,7 +162,7 @@ export async function sendPayment(sourceSecret, destination, amount, assetCode =
       });
       // Track stats for cost monitoring
       feeBumpStats.total += 1;
-      feeBumpStats.totalFeeStroops += StellarSDK.BASE_FEE * 10;
+      feeBumpStats.totalFeeStroops += StellarSDK.BASE_FEE * parseInt(process.env.FEE_BUMP_MULTIPLIER ?? '10', 10);
       feeBumpStats.accounts.add(sourcePublicKey);
     }
   }
@@ -169,7 +170,6 @@ export async function sendPayment(sourceSecret, destination, amount, assetCode =
   let result;
   try {
     result = await getHorizonServer().submitTransaction(txToSubmit);
-    result = await getHorizonServer().submitTransaction(transaction);
   } catch (err) {
     logger.error('stellar.sendPayment.failed', { source: sourcePublicKey, destination, amount, assetCode, error: err.message });
     throw err;
