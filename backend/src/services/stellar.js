@@ -254,7 +254,7 @@ export async function createTrustline(sourceSecret, assetCode) {
 }
 
 export async function getTransactions(publicKey, { cursor, limit = 10, type, dateFrom, dateTo } = {}) {
-  let builder = server.transactions().forAccount(publicKey).order('desc').limit(limit);
+  let builder = getHorizonServer().transactions().forAccount(publicKey).order('desc').limit(limit);
   if (cursor) builder = builder.cursor(cursor);
 
   const page = await builder.call();
@@ -327,23 +327,7 @@ export async function getFeeStats() {
   };
 }
 
-export async function getTransactionHistory(publicKey, { limit = 10, cursor } = {}) {
-  let call = getHorizonServer().transactions().forAccount(publicKey).limit(limit).order('desc');
-  if (cursor) call = call.cursor(cursor);
-  const result = await call.call();
-  return {
-    publicKey,
-    transactions: result.records.map(tx => ({
-      id: tx.id,
-      hash: tx.hash,
-      createdAt: tx.created_at,
-      successful: tx.successful,
-      ledger: tx.ledger_attr,
-      pagingToken: tx.paging_token,
-    })),
-    nextCursor: result.records.at(-1)?.paging_token ?? null,
-  };
-}
+
 
 export async function getExchangeRate(from, to) {
   if (from === to) return 1.0;
