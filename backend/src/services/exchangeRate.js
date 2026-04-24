@@ -2,6 +2,7 @@ import * as StellarSDK from '@stellar/stellar-sdk';
 import logger from '../config/logger.js';
 import { getIssuer, SUPPORTED_ASSETS } from '../config/assets.js';
 import { broadcastToAccount } from './websocket.js';
+import { onConfigChange } from '../config/env.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -19,6 +20,14 @@ const COINGECKO_IDS = { XLM: 'stellar', USDC: 'usd-coin' };
 const cache = new Map();
 const lastRates = new Map(); // for change detection
 let lastFetchAt = 0;
+
+// Clear cache when config changes (e.g., STELLAR_NETWORK switches)
+onConfigChange(() => {
+  cache.clear();
+  lastRates.clear();
+  lastFetchAt = 0;
+  logger.info('exchangeRate.cache.cleared', { reason: 'config reload' });
+});
 
 function cacheKey(from, to) { return `${from}:${to}`; }
 
