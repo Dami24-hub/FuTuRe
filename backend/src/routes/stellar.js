@@ -1,4 +1,5 @@
 import express from 'express';
+import { body } from 'express-validator';
 import * as StellarSDK from '@stellar/stellar-sdk';
 import * as StellarService from '../services/stellar.js';
 import * as AMMService from '../services/amm.js';
@@ -9,6 +10,7 @@ import { SUPPORTED_ASSETS, getIssuer } from '../config/assets.js';
 import { dispatchEvent } from '../webhooks/dispatcher.js';
 import { cacheMiddleware } from '../middleware/cache.js';
 import { keys as cacheKeys, TTL, invalidateBalance } from '../cache/appCache.js';
+import prisma from '../db/client.js';
 
 const router = express.Router();
 
@@ -37,6 +39,16 @@ router.post('/account/create', async (req, res) => {
   try {
     const account = await StellarService.createAccount();
     res.json(account);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/account/fund', rules.publicKeyBody, validate, async (req, res) => {
+  if (!StellarService.isTestnet()) return res.status(403).json({ error: 'Only available on testnet' });
+  try {
+    const result = await StellarService.fundAccount(req.body.publicKey);
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -127,8 +139,8 @@ router.get('/account/:publicKey', rules.publicKeyParam, validate,
  */
 router.post('/payment/send', rules.sendPayment, validate, async (req, res) => {
   try {
-    const { sourceSecret, destination, amount, assetCode, memo } = req.body;
-    const result = await StellarService.sendPayment(sourceSecret, destination, amount, assetCode, memo);
+    const { sourceSecret, destination, amount, assetCode, memo, memoType } = req.body;
+    const result = await StellarService.sendPayment(sourceSecret, destination, amount, assetCode, memo, memoType);
 
     const notification = { type: 'transaction', hash: result.hash, amount, assetCode: assetCode || 'XLM', timestamp: Date.now() };
 
@@ -191,7 +203,7 @@ router.post('/payment/send', rules.sendPayment, validate, async (req, res) => {
  */
 router.get('/account/:publicKey/transactions', rules.publicKeyParam, validate, async (req, res) => {
   try {
-    const { cursor, limit, type, dateFrom, dateTo } = req.query;
+    const { cursor, limit, type, dateFrom, dateTo, hash } = req.query;
     const result = await StellarService.getTransactions(req.params.publicKey, {
       cursor,
       limit: limit ? Math.min(parseInt(limit), 50) : 10,
@@ -199,6 +211,10 @@ router.get('/account/:publicKey/transactions', rules.publicKeyParam, validate, a
       dateFrom,
       dateTo,
     });
+    if (hash) {
+      const prefix = hash.toLowerCase();
+      result.records = result.records.filter(tx => tx.hash?.toLowerCase().startsWith(prefix));
+    }
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -345,6 +361,41 @@ router.post('/trustline', rules.createTrustline, validate, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+router.get('/account/:publicKey/label', rules.publicKeyParam, validate, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { publicKey: req.params.publicKey },
+      include: { settings: true },
+    });
+    res.json({ accountLabel: user?.settings?.accountLabel ?? null });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.put('/account/:publicKey/label', rules.publicKeyParam, validate,
+  body('accountLabel').trim().isLength({ max: 50 }).withMessage('Label must be 50 characters or fewer'),
+  validate,
+  async (req, res) => {
+    try {
+      const { accountLabel } = req.body;
+      const user = await prisma.user.upsert({
+        where: { publicKey: req.params.publicKey },
+        update: {},
+        create: { publicKey: req.params.publicKey },
+      });
+      await prisma.setting.upsert({
+        where: { userId: user.id },
+        update: { accountLabel: accountLabel || null },
+        create: { userId: user.id, accountLabel: accountLabel || null },
+      });
+      res.json({ accountLabel: accountLabel || null });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
 
 export default router;
 

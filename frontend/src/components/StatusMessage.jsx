@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { CopyButton } from './CopyButton';
 
 const VARIANTS = {
   hidden: { opacity: 0, y: 12, scale: 0.97 },
@@ -20,6 +21,7 @@ function Message({ msg, onRemove, onRetry }) {
     >
       <span className="sm-icon" aria-hidden="true">{msg.icon}</span>
       <span className="sm-text">{msg.message}</span>
+      {msg.hash && <CopyButton text={msg.hash} label="Copy transaction hash" />}
       {msg.retry && (
         <button className="sm-retry" onClick={() => { onRetry(msg.id); msg.retry(); }} aria-label="Retry action">Retry</button>
       )}

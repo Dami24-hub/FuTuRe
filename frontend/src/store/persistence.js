@@ -14,6 +14,7 @@ function sanitize(state) {
     account: state.account?.publicKey
       ? { publicKey: state.account.publicKey }
       : null,
+    accountLabel: state.accountLabel || '',
   };
 }
 
@@ -27,6 +28,7 @@ export function loadState() {
     return {
       ...initialState,
       account: saved.account ?? null,
+      accountLabel: saved.accountLabel ?? '',
     };
   } catch {
     return initialState;

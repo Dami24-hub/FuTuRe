@@ -3,6 +3,7 @@ import { eventMonitor } from '../eventSourcing/index.js';
 import { getConfig } from '../config/env.js';
 import prisma from '../db/client.js';
 import { getIssuer } from '../config/assets.js';
+import { getHorizonServer } from './stellar.js';
 
 function isTestnet() {
   return getConfig().stellar.network === 'testnet';
@@ -12,16 +13,8 @@ function getNetworkPassphrase() {
   return isTestnet() ? StellarSDK.Networks.TESTNET : StellarSDK.Networks.PUBLIC;
 }
 
-let _horizonServer;
-let _horizonUrl;
-function getServer() {
-  const { horizonUrl } = getConfig().stellar;
-  if (!_horizonServer || horizonUrl !== _horizonUrl) {
-    _horizonUrl = horizonUrl;
-    _horizonServer = new StellarSDK.Horizon.Server(horizonUrl);
-  }
-  return _horizonServer;
-}
+const isTestnet = process.env.STELLAR_NETWORK === 'testnet';
+const networkPassphrase = isTestnet ? StellarSDK.Networks.TESTNET : StellarSDK.Networks.PUBLIC;
 
 /**
  * Create a multi-signature account by setting signers and threshold on an existing account.
@@ -32,14 +25,7 @@ function getServer() {
  */
 export async function createMultiSigAccount(sourceSecret, signers, thresholds, masterWeight = 1) {
   const sourceKeypair = StellarSDK.Keypair.fromSecret(sourceSecret);
-  const sourceAccount = await getServer().loadAccount(sourceKeypair.publicKey());
-
-  const txBuilder = new StellarSDK.TransactionBuilder(sourceAccount, {
-    fee: StellarSDK.BASE_FEE,
-    getNetworkPassphrase(),
-  });
-
-  // Set thresholds and master weight
+  const sourceAccount = await getHorizonServer().loadAccount(sourceKeypair.publicKey());
   txBuilder.addOperation(
     StellarSDK.Operation.setOptions({
       masterWeight,
@@ -63,7 +49,7 @@ export async function createMultiSigAccount(sourceSecret, signers, thresholds, m
 
   const transaction = txBuilder.setTimeout(30).build();
   transaction.sign(sourceKeypair);
-  const result = await getServer().submitTransaction(transaction);
+  const result = await getHorizonServer().submitTransaction(transaction);
 
   await eventMonitor.publishEvent(sourceKeypair.publicKey(), {
     type: 'MultiSigAccountCreated',
@@ -91,7 +77,7 @@ export async function createMultiSigAccount(sourceSecret, signers, thresholds, m
  * Build a multi-sig transaction (XDR) without submitting — signers collect signatures separately.
  */
 export async function buildMultiSigTransaction(sourcePublicKey, destination, amount, assetCode = 'XLM') {
-  const sourceAccount = await getServer().loadAccount(sourcePublicKey);
+  const sourceAccount = await getHorizonServer().loadAccount(sourcePublicKey);
 
   const asset =
     assetCode === 'XLM'
@@ -188,8 +174,8 @@ export async function submitMultiSigTransaction(txId) {
   if (!pending) throw new Error(`Transaction ${txId} not found`);
   if (pending.status !== 'pending') throw new Error(`Transaction ${txId} is already ${pending.status}`);
 
-  const transaction = StellarSDK.TransactionBuilder.fromXDR(pending.txXdr, getNetworkPassphrase());
-  const result = await getServer().submitTransaction(transaction);
+  const transaction = StellarSDK.TransactionBuilder.fromXDR(pending.txXdr, networkPassphrase);
+  const result = await getHorizonServer().submitTransaction(transaction);
 
   await prisma.pendingMultiSigTx.update({
     where: { txId },
@@ -246,7 +232,7 @@ export function verifySignatures(txXdr, expectedSigners) {
  * Get the current signers and thresholds for an account from the network.
  */
 export async function getMultiSigConfig(publicKey) {
-  const account = await getServer().loadAccount(publicKey);
+  const account = await getHorizonServer().loadAccount(publicKey);
 
   const signers = account.signers.map((s) => ({
     publicKey: s.key,
@@ -271,7 +257,7 @@ export async function getMultiSigConfig(publicKey) {
  */
 export async function updateMultiSigConfig(sourceSecret, updates) {
   const sourceKeypair = StellarSDK.Keypair.fromSecret(sourceSecret);
-  const sourceAccount = await getServer().loadAccount(sourceKeypair.publicKey());
+  const sourceAccount = await getHorizonServer().loadAccount(sourceKeypair.publicKey());
 
   const txBuilder = new StellarSDK.TransactionBuilder(sourceAccount, {
     fee: StellarSDK.BASE_FEE,
@@ -311,7 +297,7 @@ export async function updateMultiSigConfig(sourceSecret, updates) {
 
   const transaction = txBuilder.setTimeout(30).build();
   transaction.sign(sourceKeypair);
-  const result = await getServer().submitTransaction(transaction);
+  const result = await getHorizonServer().submitTransaction(transaction);
 
   await eventMonitor.publishEvent(sourceKeypair.publicKey(), {
     type: 'MultiSigConfigUpdated',

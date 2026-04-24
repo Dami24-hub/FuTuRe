@@ -29,6 +29,8 @@ model Transaction {
   amount        Decimal
   ledger        Int?
   successful    Boolean        @default(true)
+  memo          String?
+  memoType      String?        // 'text' | 'id'
   createdAt     DateTime       @default(now())
   senderId      String
   sender        User           @relation("sender", fields: [senderId], references: [id])
@@ -57,6 +59,7 @@ model Setting {
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   defaultAsset    String   @default("XLM")
   notificationsOn Boolean  @default(true)
+  accountLabel    String?
   updatedAt       DateTime @updatedAt
 }
 
