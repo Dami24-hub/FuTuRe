@@ -21,6 +21,7 @@ import { CopyButton } from './components/CopyButton';
 import { Spinner } from './components/Spinner';
 import { TransactionHistory } from './components/TransactionHistory';
 import { StreamPayment } from './components/StreamPayment';
+import { PathPayment } from './components/PathPayment';
 import { FeeDisplay } from './components/FeeDisplay';
 import { InlineConfirmation } from './components/InlineConfirmation';
 import { logError } from './utils/errorLogger';
@@ -811,6 +812,11 @@ function App() {
                 {/* Stream Payments */}
                 <motion.div variants={v.fadeSlide}>
                   <StreamPayment publicKey={account.publicKey} />
+                </motion.div>
+
+                {/* Path Payment */}
+                <motion.div variants={v.fadeSlide}>
+                  <PathPayment account={account} />
                 </motion.div>
 
               </motion.div>
