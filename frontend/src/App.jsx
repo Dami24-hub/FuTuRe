@@ -94,8 +94,6 @@ function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
   }, [loading, showShortcuts]);
 
   // Listen for SW notification that we're back online with queued payments
