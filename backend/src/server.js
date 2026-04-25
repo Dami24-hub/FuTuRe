@@ -126,11 +126,28 @@ app.use(errorHandler);
 
 app.get('/health', async (req, res) => {
   const db = await checkDBHealth();
-  const status = db.status === 'ok' ? 'ok' : 'degraded';
-  res.status(db.status === 'ok' ? 200 : 503).json({
+  
+  // Check Stellar network connectivity
+  let stellar = { online: false };
+  try {
+    const { getNetworkStatus } = await import('./services/stellar.js');
+    stellar = await getNetworkStatus();
+  } catch (err) {
+    logger.warn('health.stellar.check.failed', { error: err.message });
+  }
+  
+  const allHealthy = db.status === 'ok' && stellar.online;
+  const status = allHealthy ? 'ok' : 'degraded';
+  
+  res.status(allHealthy ? 200 : 503).json({
     status,
     network: getConfig().stellar.network,
     db,
+    stellar: {
+      online: stellar.online,
+      network: stellar.network || null,
+      horizonVersion: stellar.horizonVersion || null,
+    },
   });
 });
 

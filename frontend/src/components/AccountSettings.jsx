@@ -4,6 +4,7 @@ import { AddressBook } from './AddressBook';
 import { WebhookManager } from './WebhookManager';
 import { BackupSettings } from './BackupSettings';
 import { ComplianceDashboard } from './ComplianceDashboard';
+import { AccountMerge } from './AccountMerge';
 
 const ASSETS = ['XLM', 'USDC', 'EURC'];
 
@@ -14,6 +15,7 @@ export function AccountSettings({ publicKey, onClose }) {
   const [saved, setSaved] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [showCompliance, setShowCompliance] = useState(false);
+  const [showMerge, setShowMerge] = useState(false);
   const [userRole, setUserRole] = useState(null);
 
   useEffect(() => {
@@ -144,6 +146,13 @@ export function AccountSettings({ publicKey, onClose }) {
                   🛡️ Compliance Dashboard
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => setShowMerge(true)}
+                style={{ fontSize: '0.9rem', padding: '8px 16px', background: '#dc2626' }}
+              >
+                ⚠️ Merge Account
+              </button>
             </div>
 
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -158,6 +167,18 @@ export function AccountSettings({ publicKey, onClose }) {
 
         {showBackup && <BackupSettings onClose={() => setShowBackup(false)} />}
         {showCompliance && <ComplianceDashboard onClose={() => setShowCompliance(false)} />}
+        {showMerge && (
+          <AccountMerge
+            sourceSecret={localStorage.getItem('secretKey')}
+            onClose={() => setShowMerge(false)}
+            onSuccess={() => {
+              setShowMerge(false);
+              alert('Account merged successfully. You will be logged out.');
+              localStorage.clear();
+              window.location.reload();
+            }}
+          />
+        )}
       </div>
     </div>
   );
