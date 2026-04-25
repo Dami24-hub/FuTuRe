@@ -34,12 +34,17 @@ import { FileUpload } from './components/FileUpload';
 import { AccountCreatedCelebration } from './components/AccountCreatedCelebration';
 import { TxLookup } from './components/TxLookup';
 import { AddressBook } from './components/AddressBook';
+import { MultiSigTransactions } from './components/MultiSigTransactions';
+import { KYCForm } from './components/KYCForm';
+import { NotificationPreferences } from './components/NotificationPreferences';
+import { NotificationBell } from './components/NotificationBell';
 import { useTheme } from './contexts/ThemeContext';
 import { useAppState, useAppDispatch, A } from './store/index.js';
 import { useExchangeRate } from './hooks/useExchangeRate';
 
 const STATUS_COLORS = { connected: '#22c55e', disconnected: '#ef4444', reconnecting: '#f59e0b' };
 const TIMEOUT_MS = 30000;
+const KYC_LARGE_TRANSACTION_LIMIT = 1000;
 
 function withTimeout(promiseFn) {
   const controller = new AbortController();
@@ -60,21 +65,19 @@ function App() {
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState('');
   const [showCelebration, setShowCelebration] = useState(false);
+  const [kycStatus, setKycStatus] = useState(null);
+  const [kycLoading, setKycLoading] = useState(false);
+  const [kycError, setKycError] = useState(null);
 
   const msg = useMessages();
   const { canInstall, install, updateAvailable, applyUpdate } = usePWA();
   const { queue: queueOffline, dequeue, pendingItems, pendingCount } = useOfflineQueue();
-  const { isDark, toggleTheme } = useTheme();
-  const [replaySecret, setReplaySecret] = useState('');
-  const [showReplayPrompt, setShowReplayPrompt] = useState(false);
-  const [editingLabel, setEditingLabel] = useState(false);
-  const [labelDraft, setLabelDraft] = useState('');
-  const [showCelebration, setShowCelebration] = useState(false);
   const [showTxLookup, setShowTxLookup] = useState(false);
   const [deepLinkHash, setDeepLinkHash] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [lastWsMessage, setLastWsMessage] = useState(null);
-  const { theme, isDark, toggleTheme } = useTheme();
+  const [activeSettingsSection, setActiveSettingsSection] = useState(null); // null, 'multisig', 'kyc', 'notifications'
+  const { isDark, toggleTheme } = useTheme();
   useRTL();
   const prefersReduced = useReducedMotion();
   const v = makeVariants(prefersReduced);
@@ -183,6 +186,33 @@ function App() {
     } catch { /* non-critical */ }
   }, [dispatch]);
 
+  const fetchKycStatus = useCallback(async () => {
+    if (!account?.publicKey) {
+      setKycStatus(null);
+      return;
+    }
+
+    setKycLoading(true);
+    try {
+      const { data } = await axios.get('/api/compliance/kyc/status');
+      setKycStatus(data.status);
+      setKycError(null);
+    } catch (error) {
+      if (error.response?.status === 404) {
+        setKycStatus(null);
+      } else {
+        setKycError(error.response?.data?.error || 'Failed to load KYC status');
+        setKycStatus(null);
+      }
+    } finally {
+      setKycLoading(false);
+    }
+  }, [account?.publicKey]);
+
+  useEffect(() => {
+    fetchKycStatus();
+  }, [fetchKycStatus]);
+
   const saveLabel = async () => {
     if (!account) return;
     try {
@@ -240,6 +270,7 @@ function App() {
   const amountTouched = amount.length > 0;
   const amountError = validateAmount(amount, xlmBalance !== null ? parseFloat(xlmBalance) : null);
   const amountValid = amountTouched && !amountError;
+  const largeTransactionBlocked = amountValid && kycStatus !== 'APPROVED' && parseFloat(amount) > KYC_LARGE_TRANSACTION_LIMIT;
 
   const handleSendMax = () => {
     if (xlmBalance === null) return;
@@ -249,6 +280,11 @@ function App() {
 
   const sendPayment = async () => {
     if (!account || !recipientValid || !amountValid) return;
+    if (kycStatus !== 'APPROVED' && parseFloat(amount) > KYC_LARGE_TRANSACTION_LIMIT) {
+      msg.error(`Large transactions above ${KYC_LARGE_TRANSACTION_LIMIT} XLM require approved KYC.`);
+      return;
+    }
+
     dispatch({ type: A.SET_LOADING, payload: 'send' });
     const payload = { sourceSecret: account.secretKey, destination: recipient, amount, assetCode: 'XLM', memo: memo || undefined, memoType: memo ? memoType : undefined };
 
@@ -421,6 +457,7 @@ function App() {
               >
                 🔍
               </button>
+              <NotificationBell />
               {account && (
                 <button
                   type="button"
@@ -786,12 +823,17 @@ function App() {
                       <motion.button
                         onClick={() => setShowConfirm(true)}
                         {...tap}
-                        disabled={!recipientValid || !amountValid || loading === 'send'}
+                        disabled={!recipientValid || !amountValid || loading === 'send' || largeTransactionBlocked}
                         aria-busy={loading === 'send'}
                         aria-label="Send XLM payment"
                       >
                         {loading === 'send' ? <Spinner label="Sending payment…" /> : 'Send'}
                       </motion.button>
+                      {largeTransactionBlocked && (
+                        <p style={{ color: '#b45309', margin: '0 0 0 12px', fontSize: '0.9rem' }}>
+                          Large transactions above {KYC_LARGE_TRANSACTION_LIMIT} XLM require approved KYC.
+                        </p>
+                      )}
                       <InlineConfirmation
                         isVisible={confirmClear}
                         message="Clear form?"
@@ -831,6 +873,53 @@ function App() {
                   <StreamPayment publicKey={account.publicKey} />
                 </motion.div>
 
+                {/* Settings Sections Tabs */}
+                <motion.section className="section" variants={v.fadeSlide}>
+                  <h2 style={{ marginBottom: 16 }}>Advanced Features</h2>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+                    {[
+                      { id: 'multisig', label: '🔐 Multi-Sig' },
+                      { id: 'kyc', label: '📋 KYC' },
+                      { id: 'notifications', label: '🔔 Notifications' },
+                    ].map((section) => (
+                      <button
+                        key={section.id}
+                        type="button"
+                        onClick={() => setActiveSettingsSection(activeSettingsSection === section.id ? null : section.id)}
+                        style={{
+                          padding: '10px 16px',
+                          background: activeSettingsSection === section.id ? '#2563eb' : '#f3f4f6',
+                          color: activeSettingsSection === section.id ? '#fff' : '#333',
+                          border: 'none',
+                          borderRadius: 4,
+                          cursor: 'pointer',
+                          fontWeight: 500,
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        {section.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <AnimatePresence mode="wait">
+                    {activeSettingsSection === 'multisig' && (
+                      <motion.div key="multisig" variants={v.fadeSlide} initial="hidden" animate="visible" exit="exit">
+                        <MultiSigTransactions publicKey={account.publicKey} />
+                      </motion.div>
+                    )}
+                    {activeSettingsSection === 'kyc' && (
+                      <motion.div key="kyc" variants={v.fadeSlide} initial="hidden" animate="visible" exit="exit">
+                        <KYCForm />
+                      </motion.div>
+                    )}
+                    {activeSettingsSection === 'notifications' && (
+                      <motion.div key="notifications" variants={v.fadeSlide} initial="hidden" animate="visible" exit="exit">
+                        <NotificationPreferences />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.section>
                 {/* Path Payment */}
                 <motion.div variants={v.fadeSlide}>
                   <PathPayment account={account} />
