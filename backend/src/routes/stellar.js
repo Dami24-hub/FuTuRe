@@ -13,6 +13,7 @@ import { keys as cacheKeys, TTL, invalidateBalance } from '../cache/appCache.js'
 import prisma from '../db/client.js';
 import { getSubscriptionByPublicKey, sendWebPush } from '../notifications/webPush.js';
 import logger from '../config/logger.js';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
 
@@ -154,7 +155,14 @@ router.get('/account/:publicKey', rules.publicKeyParam, validate,
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post('/payment/send', rules.sendPayment, validate, async (req, res) => {
+// Stricter rate limit for payment endpoint (10 req/min)
+const paymentRateLimiter = createRateLimiter({
+  windowMs: 60000,
+  max: 10,
+  message: 'Too many payment requests, please try again later.',
+});
+
+router.post('/payment/send', paymentRateLimiter, rules.sendPayment, validate, async (req, res) => {
   try {
     const { sourceSecret, destination, amount, assetCode, memo, memoType } = req.body;
     const result = await StellarService.sendPayment(sourceSecret, destination, amount, assetCode, memo, memoType);
@@ -483,3 +491,14 @@ router.put('/account/:publicKey/settings',
 );
 
 export default router;
+
+// POST /api/stellar/account/merge - Merge account (irreversible)
+router.post('/account/merge', rules.mergeAccount, validate, async (req, res) => {
+  try {
+    const { sourceSecret, destination } = req.body;
+    const result = await StellarService.mergeAccount(sourceSecret, destination);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
