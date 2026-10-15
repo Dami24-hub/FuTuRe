@@ -9,6 +9,12 @@ import { createDelegatedStreamEscrow, tickStreamPayment } from './streamContract
 
 export { prisma };
 
+/** Consecutive payment failures before a stream is marked FAILED (default 5). */
+export const STREAM_MAX_CONSECUTIVE_FAILURES = Math.max(
+  1,
+  Number.parseInt(process.env.STREAM_MAX_CONSECUTIVE_FAILURES || '5', 10) || 5,
+);
+
 const STREAM_LOCK_TTL_SECONDS = 30;
 const redisLock = createRedisBackend(process.env.REDIS_URL);
 let redisLockConnecting = null;
@@ -427,7 +433,7 @@ export async function processActiveStreams() {
        // Claim before paying. The claim is deliberately not reverted on failure:
        // a submission error can be ambiguous (the tx may have landed), so the
        // retry waits for the next interval rather than risking a double send.
-       // Failures are still recorded and the stream halts after 3 in a row.
+       // Failures are still recorded and the stream halts after STREAM_MAX_CONSECUTIVE_FAILURES.
        if (!(await claimStreamInterval(stream, now))) {
          incrementCounter('stream_payment_claim_conflicts_total');
          logger.debug('streaming.process.already_claimed', { streamId: stream.id });
@@ -474,10 +480,10 @@ export async function processActiveStreams() {
            data: { failureCount: { increment: 1 } },
          });
 
-         // Exponential backoff so transient Horizon errors do not burn retries
-         // on consecutive 10s worker ticks.
+         // Exponential backoff: intervalSeconds * 2^failureCount so transient
+         // Horizon/network glitches do not burn through the retry allowance.
          const backoffSeconds = Math.min(
-           Math.max(stream.intervalSeconds, 60 * Math.pow(2, updatedStream.failureCount - 1)),
+           stream.intervalSeconds * Math.pow(2, updatedStream.failureCount),
            3600,
          );
          await prisma.paymentStream.update({
@@ -485,7 +491,7 @@ export async function processActiveStreams() {
            data: { nextAttemptAt: new Date(Date.now() + backoffSeconds * 1000) },
          });
 
-         if (updatedStream.failureCount >= 3) {
+         if (updatedStream.failureCount >= STREAM_MAX_CONSECUTIVE_FAILURES) {
            await prisma.paymentStream.update({
              where: { id: stream.id },
              data: { status: 'FAILED' },
@@ -495,7 +501,7 @@ export async function processActiveStreams() {
            if (subscription) {
              await sendWebPush(subscription, {
                title: 'Payment stream failed',
-               body: `Your payment stream failed after 3 consecutive errors: ${err.message}`,
+               body: `Your payment stream failed after ${STREAM_MAX_CONSECUTIVE_FAILURES} consecutive errors: ${err.message}`,
                data: { streamId: stream.id, reason: err.message },
              });
            }

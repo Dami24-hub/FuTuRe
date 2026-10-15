@@ -221,7 +221,7 @@ describe('Stream failure escalation', () => {
     mockFailures.length = 0;
   });
 
-  it('marks a stream FAILED after 3 consecutive failures and sends push notification', async () => {
+  it('marks a stream FAILED after 5 consecutive failures and sends push notification', async () => {
     tickStreamPayment.mockRejectedValue(new Error('insufficient balance'));
 
     const stream = {
@@ -235,20 +235,22 @@ describe('Stream failure escalation', () => {
       senderSecret: null,
       escrowContractId: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHLQN',
       contractStreamId: '1',
+      nextAttemptAt: null,
       sender: mockUsers[0],
       recipient: mockUsers[1],
       endTime: null,
     };
     mockStreams.push(stream);
 
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       stream.lastProcessedAt = new Date(Date.now() - 70000);
+      stream.nextAttemptAt = null;
       await StreamingService.processActiveStreams();
     }
 
     const finalStream = mockStreams.find(s => s.id === STREAM_FAIL_ID);
     expect(finalStream.status).toBe('FAILED');
-    expect(finalStream.failureCount).toBe(3);
+    expect(finalStream.failureCount).toBe(5);
     expect(webPush.sendWebPush).toHaveBeenCalledWith(
       expect.objectContaining({ endpoint: expect.any(String) }),
       expect.objectContaining({
@@ -264,7 +266,7 @@ describe('Stream failure escalation', () => {
     const stream = {
       id: STREAM_REASON_ID,
       status: 'ACTIVE',
-      failureCount: 2,
+      failureCount: 4,
       lastProcessedAt: new Date(Date.now() - 70000),
       intervalSeconds: 60,
       rateAmount: 1,
@@ -272,6 +274,7 @@ describe('Stream failure escalation', () => {
       senderSecret: null,
       escrowContractId: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHLQN',
       contractStreamId: '1',
+      nextAttemptAt: null,
       sender: mockUsers[0],
       recipient: mockUsers[1],
       endTime: null,
