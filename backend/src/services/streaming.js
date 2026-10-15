@@ -1,10 +1,11 @@
 /* backend/src/services/streaming.js */
+import pLimit from 'p-limit';
 import prisma from '../db/client.js';
 import { eventMonitor } from '../eventSourcing/index.js';
 import logger, { withContext } from '../config/logger.js';
 import { getSubscriptionByPublicKey, sendWebPush } from '../notifications/webPush.js';
 import { createRedisBackend } from '../cache/redis.js';
-import { incrementCounter } from '../monitoring/metrics.js';
+import { incrementCounter, recordStreamingWorkerDuration } from '../monitoring/metrics.js';
 import { createDelegatedStreamEscrow, tickStreamPayment } from './streamContract.js';
 
 export { prisma };
@@ -385,13 +386,131 @@ export async function getStreamFailures(id) {
   });
 }
 
+const STREAM_WORKER_CONCURRENCY = 5;
+
+/**
+ * Process a single due payment stream (lock, claim, pay, record outcome).
+ * @param {object} stream
+ * @param {Date} now
+ * @returns {Promise<boolean>} true if a payment attempt was made
+ */
+export async function processSingleStream(stream, now = new Date()) {
+  const lastProcessed = new Date(stream.lastProcessedAt);
+  const secondsSinceLast = (now - lastProcessed) / 1000;
+
+  if (secondsSinceLast < stream.intervalSeconds) return false;
+
+  const lockOwner = `${process.pid}:${now.getTime()}`;
+  if (!(await acquireStreamLock(stream.id, lockOwner))) {
+    incrementCounter('stream_payment_claim_conflicts_total');
+    logger.debug('streaming.process.locked', { streamId: stream.id });
+    return false;
+  }
+
+  try {
+    // Claim before paying. The claim is deliberately not reverted on failure:
+    // a submission error can be ambiguous (the tx may have landed), so the
+    // retry waits for the next interval rather than risking a double send.
+    // Failures are still recorded and the stream halts after STREAM_MAX_CONSECUTIVE_FAILURES.
+    if (!(await claimStreamInterval(stream, now))) {
+      incrementCounter('stream_payment_claim_conflicts_total');
+      logger.debug('streaming.process.already_claimed', { streamId: stream.id });
+      return false;
+    }
+
+    try {
+      if (!stream.escrowContractId || !stream.contractStreamId) {
+        throw new Error('Stream missing delegated escrow references — cannot tick without user secret storage');
+      }
+
+      // Release one interval from Soroban escrow — no user private key involved
+      const result = await tickStreamPayment(stream.escrowContractId, stream.contractStreamId);
+
+      if (result.success) {
+        await prisma.paymentStream.update({
+          where: { id: stream.id },
+          data: {
+            totalStreamed: { increment: stream.rateAmount },
+            failureCount: 0,
+            nextAttemptAt: null,
+          },
+        });
+
+        await eventMonitor.publishEvent(stream.sender.publicKey, {
+          type: 'StreamPaymentProcessed',
+          data: { streamId: stream.id, amount: stream.rateAmount, hash: result.hash },
+          version: 1,
+        });
+
+        withContext(logger, { action: 'processStream', correlationId: stream.id }).info('streaming.process.success', { streamId: stream.id, hash: result.hash });
+        incrementCounter('active_streams_processed_total');
+        return true;
+      }
+      throw new Error('Transaction submission failed');
+    } catch (err) {
+      withContext(logger, { action: 'processStream', correlationId: stream.id }).error('streaming.process.failed', { streamId: stream.id, error: err.message });
+
+      await prisma.streamFailure.create({
+        data: { streamId: stream.id, reason: err.message },
+      });
+
+      const updatedStream = await prisma.paymentStream.update({
+        where: { id: stream.id },
+        data: { failureCount: { increment: 1 } },
+      });
+
+      // Exponential backoff: intervalSeconds * 2^failureCount so transient
+      // Horizon/network glitches do not burn through the retry allowance.
+      const backoffSeconds = Math.min(
+        stream.intervalSeconds * Math.pow(2, updatedStream.failureCount),
+        3600,
+      );
+      await prisma.paymentStream.update({
+        where: { id: stream.id },
+        data: { nextAttemptAt: new Date(Date.now() + backoffSeconds * 1000) },
+      });
+
+      if (updatedStream.failureCount >= STREAM_MAX_CONSECUTIVE_FAILURES) {
+        await prisma.paymentStream.update({
+          where: { id: stream.id },
+          data: { status: 'FAILED' },
+        });
+
+        const subscription = getSubscriptionByPublicKey(stream.sender.publicKey);
+        if (subscription) {
+          await sendWebPush(subscription, {
+            title: 'Payment stream failed',
+            body: `Your payment stream failed after ${STREAM_MAX_CONSECUTIVE_FAILURES} consecutive errors: ${err.message}`,
+            data: { streamId: stream.id, reason: err.message },
+          });
+        }
+
+        await eventMonitor.publishEvent(stream.sender.publicKey, {
+          type: 'StreamFailed',
+          data: { streamId: stream.id, reason: err.message },
+          version: 1,
+        });
+
+        withContext(logger, { action: 'processStream', correlationId: stream.id }).error('streaming.stream.halted', { streamId: stream.id, reason: err.message });
+      }
+      incrementCounter('active_streams_processed_total');
+      return true;
+    }
+  } finally {
+    await releaseStreamLock(stream.id);
+  }
+}
+
 /**
  * Worker tick: find all ACTIVE streams whose interval has elapsed and execute the next payment.
- * Streams that fail 5 consecutive times are automatically set to FAILED status.
+ * Streams that fail STREAM_MAX_CONSECUTIVE_FAILURES consecutive times are automatically set to FAILED.
+ * Due streams are processed in parallel with bounded concurrency (p-limit) so a slow Horizon
+ * call does not delay the rest of the tick window.
  * Intended to be called by a scheduled job (e.g. every 10–30 seconds).
  * @returns {Promise<void>}
  */
 export async function processActiveStreams() {
+  const tickStarted = Date.now();
   const now = new Date();
   const activeStreams = await prisma.paymentStream.findMany({
     where: {
@@ -414,109 +533,18 @@ export async function processActiveStreams() {
     include: { sender: true, recipient: true },
   });
 
-  logger.debug('streaming.worker.tick', { activeCount: activeStreams.length });
-
-  for (const stream of activeStreams) {
+  const dueStreams = activeStreams.filter((stream) => {
     const lastProcessed = new Date(stream.lastProcessedAt);
-    const secondsSinceLast = (now - lastProcessed) / 1000;
+    return (now - lastProcessed) / 1000 >= stream.intervalSeconds;
+  });
 
-    if (secondsSinceLast < stream.intervalSeconds) continue;
+  logger.debug('streaming.worker.tick', {
+    activeCount: activeStreams.length,
+    dueCount: dueStreams.length,
+  });
 
-    const lockOwner = `${process.pid}:${now.getTime()}`;
-    if (!(await acquireStreamLock(stream.id, lockOwner))) {
-      incrementCounter('stream_payment_claim_conflicts_total');
-      logger.debug('streaming.process.locked', { streamId: stream.id });
-      continue;
-    }
+  const limit = pLimit(STREAM_WORKER_CONCURRENCY);
+  await Promise.allSettled(dueStreams.map((stream) => limit(() => processSingleStream(stream, now))));
 
-    try {
-       // Claim before paying. The claim is deliberately not reverted on failure:
-       // a submission error can be ambiguous (the tx may have landed), so the
-       // retry waits for the next interval rather than risking a double send.
-       // Failures are still recorded and the stream halts after STREAM_MAX_CONSECUTIVE_FAILURES.
-       if (!(await claimStreamInterval(stream, now))) {
-         incrementCounter('stream_payment_claim_conflicts_total');
-         logger.debug('streaming.process.already_claimed', { streamId: stream.id });
-         continue;
-       }
-
-       try {
-         if (!stream.escrowContractId || !stream.contractStreamId) {
-           throw new Error('Stream missing delegated escrow references — cannot tick without user secret storage');
-         }
-
-         // Release one interval from Soroban escrow — no user private key involved
-         const result = await tickStreamPayment(stream.escrowContractId, stream.contractStreamId);
-
-         if (result.success) {
-           await prisma.paymentStream.update({
-             where: { id: stream.id },
-             data: {
-               totalStreamed: { increment: stream.rateAmount },
-               failureCount: 0,
-               nextAttemptAt: null,
-             },
-           });
-
-           await eventMonitor.publishEvent(stream.sender.publicKey, {
-             type: 'StreamPaymentProcessed',
-             data: { streamId: stream.id, amount: stream.rateAmount, hash: result.hash },
-             version: 1,
-           });
-
-           withContext(logger, { action: 'processStream', correlationId: stream.id }).info('streaming.process.success', { streamId: stream.id, hash: result.hash });
-         } else {
-           throw new Error('Transaction submission failed');
-         }
-       } catch (err) {
-         withContext(logger, { action: 'processStream', correlationId: stream.id }).error('streaming.process.failed', { streamId: stream.id, error: err.message });
-
-         await prisma.streamFailure.create({
-           data: { streamId: stream.id, reason: err.message },
-         });
-
-         const updatedStream = await prisma.paymentStream.update({
-           where: { id: stream.id },
-           data: { failureCount: { increment: 1 } },
-         });
-
-         // Exponential backoff: intervalSeconds * 2^failureCount so transient
-         // Horizon/network glitches do not burn through the retry allowance.
-         const backoffSeconds = Math.min(
-           stream.intervalSeconds * Math.pow(2, updatedStream.failureCount),
-           3600,
-         );
-         await prisma.paymentStream.update({
-           where: { id: stream.id },
-           data: { nextAttemptAt: new Date(Date.now() + backoffSeconds * 1000) },
-         });
-
-         if (updatedStream.failureCount >= STREAM_MAX_CONSECUTIVE_FAILURES) {
-           await prisma.paymentStream.update({
-             where: { id: stream.id },
-             data: { status: 'FAILED' },
-           });
-
-           const subscription = getSubscriptionByPublicKey(stream.sender.publicKey);
-           if (subscription) {
-             await sendWebPush(subscription, {
-               title: 'Payment stream failed',
-               body: `Your payment stream failed after ${STREAM_MAX_CONSECUTIVE_FAILURES} consecutive errors: ${err.message}`,
-               data: { streamId: stream.id, reason: err.message },
-             });
-           }
-
-           await eventMonitor.publishEvent(stream.sender.publicKey, {
-             type: 'StreamFailed',
-             data: { streamId: stream.id, reason: err.message },
-             version: 1,
-           });
-
-           withContext(logger, { action: 'processStream', correlationId: stream.id }).error('streaming.stream.halted', { streamId: stream.id, reason: err.message });
-         }
-       }
-    } finally {
-      await releaseStreamLock(stream.id);
-    }
-  }
+  recordStreamingWorkerDuration((Date.now() - tickStarted) / 1000);
 }
