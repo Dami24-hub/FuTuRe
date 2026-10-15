@@ -88,6 +88,9 @@ export function validateRateAmount(rateAmount) {
   return value;
 }
 
+/** Smallest prorated settlement we will execute (1 stroop). */
+export const MIN_PRORATED_SETTLEMENT = 0.0000001;
+
 /** Native Stellar assets do not require a trustline. */
 const NATIVE_ASSET_CODES = new Set(['', 'XLM', 'NATIVE']);
 
@@ -342,21 +345,90 @@ export async function resumeStream(id) {
 }
 
 /**
+ * Compute the prorated amount owed for the elapsed portion of the current
+ * active interval. Capped at one full interval and rounded down to 7 decimal
+ * places (Stellar's maximum precision).
+ * @param {import('@prisma/client').PaymentStream} stream
+ * @returns {Promise<{amount: number, hash: string|null}>}
+ */
+async function computeProratedSettlement(stream) {
+  const intervalSeconds = Number(stream.intervalSeconds) || 0;
+  if (intervalSeconds <= 0) return { amount: 0, hash: null };
+
+  const elapsedSeconds = (Date.now() - new Date(stream.lastProcessedAt).getTime()) / 1000;
+  if (!(elapsedSeconds > 0)) return { amount: 0, hash: null };
+
+  const rate = Number(stream.rateAmount);
+  let amount = (rate * elapsedSeconds) / intervalSeconds;
+  amount = Math.min(amount, rate);
+  amount = Math.floor(amount * 1e7) / 1e7;
+
+  if (amount < MIN_PRORATED_SETTLEMENT) return { amount: 0, hash: null };
+
+  let hash = null;
+  if (stream.escrowContractId && stream.contractStreamId) {
+    const result = await tickStreamPayment(stream.escrowContractId, stream.contractStreamId);
+    if (!result || result.success === false) {
+      const err = new Error('Prorated settlement payment failed');
+      err.code = 'STREAM_PRORATED_SETTLEMENT_FAILED';
+      throw err;
+    }
+    hash = result.hash ?? null;
+  }
+
+  return { amount, hash };
+}
+
+/**
  * Permanently cancel a payment stream. Cancelled streams cannot be resumed.
  * @param {number} id - Primary key of the PaymentStream record
+ * @param {{settleProrated?: boolean}} [options] - When settleProrated is true, a
+ *   final prorated payment is released for the elapsed portion of the current interval.
  * @returns {Promise<import('@prisma/client').PaymentStream>} Updated stream record with status 'CANCELLED'
  * @throws {Error} If the stream does not exist or the DB update fails
  */
-export async function cancelStream(id) {
+export async function cancelStream(id, options = {}) {
+  const { settleProrated = false } = typeof options === 'boolean' ? { settleProrated: options } : options;
+
+  const existing = await prisma.paymentStream.findUnique({
+    where: { id },
+    include: { sender: true },
+  });
+  if (!existing) throw new Error('Stream not found');
+
+  let settlement = { amount: 0, hash: null };
+  if (settleProrated) {
+    settlement = await computeProratedSettlement(existing);
+  }
+
+  const updateData = { status: 'CANCELLED' };
+  if (settlement.amount >= MIN_PRORATED_SETTLEMENT) {
+    updateData.totalStreamed = { increment: settlement.amount };
+    updateData.lastProcessedAt = new Date();
+  }
+
   const stream = await prisma.paymentStream.update({
     where: { id },
-    data: { status: 'CANCELLED' },
+    data: updateData,
     include: { sender: true },
   });
 
+  if (settlement.amount >= MIN_PRORATED_SETTLEMENT) {
+    await eventMonitor.publishEvent(stream.sender.publicKey, {
+      type: 'StreamSettled',
+      data: {
+        streamId: id,
+        amount: settlement.amount,
+        prorated: true,
+        hash: settlement.hash,
+      },
+      version: 1,
+    });
+  }
+
   await eventMonitor.publishEvent(stream.sender.publicKey, {
     type: 'StreamCancelled',
-    data: { streamId: id },
+    data: { streamId: id, settlementAmount: settlement.amount },
     version: 1,
   });
 

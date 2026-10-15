@@ -474,9 +474,14 @@ router.get('/:id/failures', streamRules.idParam, validate, async (req, res) => {
  */
 router.post('/:id/cancel', streamRules.idParam, validate, async (req, res) => {
   try {
-    const stream = await StreamingService.cancelStream(req.params.id);
+    const settleProrated =
+      req.body?.settleProrated === true || req.query?.settleProrated === 'true';
+    const stream = await StreamingService.cancelStream(req.params.id, { settleProrated });
     res.json(withNextPaymentAt(stream));
   } catch (error) {
+    if (error.code === 'STREAM_PRORATED_SETTLEMENT_FAILED') {
+      return res.status(502).json({ error: error.message, code: error.code });
+    }
     res.status(500).json({ error: error.message });
   }
 });
