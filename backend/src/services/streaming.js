@@ -41,19 +41,35 @@ async function releaseStreamLock(streamId) {
 }
 
 /**
- * Atomically claim the current interval by advancing lastProcessedAt, but only
- * if no other worker has advanced it since we read the stream. Exactly one
- * concurrent caller can win this compare-and-set.
+ * Next scheduled tick time: lastProcessedAt + intervalSeconds (fixed cadence).
+ * Advancing by the interval — not wall-clock completion time — prevents
+ * execution latency from compounding into long-term schedule drift (#1371).
+ * When the worker was offline across multiple intervals, each successful
+ * payment still advances exactly one slot so subsequent ticks catch up.
+ * @param {{ lastProcessedAt: Date|string, intervalSeconds: number }} stream
+ * @returns {Date}
+ */
+export function nextScheduledProcessedAt(stream) {
+  return new Date(
+    new Date(stream.lastProcessedAt).getTime() + stream.intervalSeconds * 1000,
+  );
+}
+
+/**
+ * Atomically claim the current interval by advancing lastProcessedAt by exactly
+ * one intervalSeconds slot, but only if no other worker has advanced it since
+ * we read the stream. Exactly one concurrent caller can win this compare-and-set.
  * @returns {Promise<boolean>} true if this worker owns the interval
  */
-async function claimStreamInterval(stream, now) {
+async function claimStreamInterval(stream, _now) {
+  const scheduledTime = nextScheduledProcessedAt(stream);
   const claimed = await prisma.paymentStream.updateMany({
     where: {
       id: stream.id,
       status: 'ACTIVE',
       lastProcessedAt: stream.lastProcessedAt,
     },
-    data: { lastProcessedAt: now },
+    data: { lastProcessedAt: scheduledTime },
   });
   return claimed.count === 1;
 }
