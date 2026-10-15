@@ -9,6 +9,28 @@ import logger from '../config/logger.js';
 const REDIS_QUEUE_PREFIX = 'mobile:queue:';
 const REDIS_QUEUE_TTL_SECONDS = 60 * 60 * 24;
 
+/** Maximum number of pending items a single user may keep queued. */
+export const MAX_OFFLINE_QUEUE_ITEMS = 50;
+/** Maximum serialized size of a single queued transaction (bytes). */
+export const MAX_PAYLOAD_BYTES = 10_000;
+
+/**
+ * Validate that a transaction payload is within the accepted byte budget.
+ * @param {unknown} transaction
+ * @throws {Error} code OFFLINE_QUEUE_PAYLOAD_TOO_LARGE
+ */
+export function validatePayloadSize(transaction) {
+  const bytes = Buffer.byteLength(JSON.stringify(transaction ?? null), 'utf8');
+  if (bytes > MAX_PAYLOAD_BYTES) {
+    const err = new Error(
+      `Offline transaction payload too large (max ${MAX_PAYLOAD_BYTES} bytes)`,
+    );
+    err.code = 'OFFLINE_QUEUE_PAYLOAD_TOO_LARGE';
+    throw err;
+  }
+  return bytes;
+}
+
 /**
  * Offline transaction queue.
  * Clients enqueue transactions while offline; the server processes them
@@ -117,7 +139,20 @@ class OfflineQueue {
   }
 
   enqueue(userId, transaction) {
+    validatePayloadSize(transaction);
+
     if (!this.queues.has(userId)) this.queues.set(userId, []);
+    const pendingCount = this.queues
+      .get(userId)
+      .filter((i) => i.status === 'pending').length;
+    if (pendingCount >= MAX_OFFLINE_QUEUE_ITEMS) {
+      const err = new Error(
+        `Offline queue limit reached (max ${MAX_OFFLINE_QUEUE_ITEMS} items)`,
+      );
+      err.code = 'OFFLINE_QUEUE_LIMIT_EXCEEDED';
+      throw err;
+    }
+
     const item = {
       id: crypto.randomUUID(),
       userId,
