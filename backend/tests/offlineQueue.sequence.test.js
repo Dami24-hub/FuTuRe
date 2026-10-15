@@ -22,6 +22,7 @@ describe('offlineQueue flushQueue sequence drift (#1377)', () => {
 
   beforeEach(() => {
     offlineQueue.queues.clear();
+    offlineQueue.persistenceEnabled = false;
     vi.clearAllMocks();
   });
 

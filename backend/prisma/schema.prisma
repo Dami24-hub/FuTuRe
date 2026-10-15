@@ -918,6 +918,25 @@ model Session {
   @@index([userId])
 }
 
+// Durable storage for mobile clients' offline transaction queues. Items are
+// persisted so they survive container restarts / redeploys and can be flushed
+// from any cluster instance. See issue #1376.
+model MobileOfflineQueueItem {
+  id              String    @id @default(uuid())
+  userId          String
+  transactionData Json
+  status          String    @default("pending") // pending | success | failed | SEQUENCE_MISMATCH
+  result          Json?
+  error           String?
+  enqueuedAt      DateTime  @default(now())
+  processedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([userId, status, enqueuedAt])
+  @@index([status])
+}
+
 // Events that repeatedly failed projection processing and were quarantined
 // so the rest of the projection pipeline can keep moving. Admins repair and
 // replay them via POST /api/v1/events/poison-pills/:id/retry. See issue #1365.
