@@ -6,6 +6,7 @@ import { getSubscriptionByPublicKey, sendWebPush } from '../notifications/webPus
 import { createRedisBackend } from '../cache/redis.js';
 import { incrementCounter } from '../monitoring/metrics.js';
 import { createDelegatedStreamEscrow, tickStreamPayment } from './streamContract.js';
+import { horizonServer } from '../config/stellar.js';
 
 export { prisma };
 
@@ -87,6 +88,102 @@ export function validateRateAmount(rateAmount) {
   return value;
 }
 
+/** Native Stellar assets do not require a trustline. */
+const NATIVE_ASSET_CODES = new Set(['', 'XLM', 'NATIVE']);
+
+/**
+ * @param {string} [assetCode]
+ * @returns {boolean} true when the asset is the native XLM asset
+ */
+export function isNativeAsset(assetCode) {
+  return NATIVE_ASSET_CODES.has(String(assetCode ?? '').toUpperCase());
+}
+
+/**
+ * Locate a balance/trustline entry for an asset on a Horizon account response.
+ * @param {object} account Horizon account record
+ * @param {string} assetCode
+ * @returns {object|undefined}
+ */
+function findAssetBalance(account, assetCode) {
+  const code = String(assetCode).toUpperCase();
+  return (account?.balances || []).find(
+    (b) => String(b.asset_code ?? '').toUpperCase() === code,
+  );
+}
+
+/**
+ * Pre-flight validation for stream creation. Rejects non-viable streams before
+ * they are persisted as ACTIVE so the first worker tick cannot fail on
+ * op_no_trust / op_underfunded.
+ *
+ * For non-native assets:
+ *  - the sender must hold the asset with a balance of at least one interval
+ *  - the recipient must have an established trustline for the asset
+ *
+ * @param {object} params
+ * @param {string} params.senderPublicKey
+ * @param {string} params.recipientPublicKey
+ * @param {string} [params.assetCode]
+ * @param {number} params.rateAmount
+ * @throws {Error} code STREAM_SENDER_BALANCE_INSUFFICIENT | STREAM_RECIPIENT_TRUSTLINE_MISSING | STREAM_PREFLIGHT_HORIZON_ERROR
+ */
+export async function validateStreamPreflight({
+  senderPublicKey,
+  recipientPublicKey,
+  assetCode,
+  rateAmount,
+}) {
+  if (isNativeAsset(assetCode)) return;
+
+  const code = String(assetCode).toUpperCase();
+
+  let senderAccount;
+  let recipientAccount;
+  try {
+    [senderAccount, recipientAccount] = await Promise.all([
+      horizonServer.loadAccount(senderPublicKey),
+      horizonServer.loadAccount(recipientPublicKey),
+    ]);
+  } catch (err) {
+    const e = new Error(
+      `Unable to verify stream viability on Horizon: ${err.message}`,
+    );
+    e.code = 'STREAM_PREFLIGHT_HORIZON_ERROR';
+    throw e;
+  }
+
+  const senderBalance = findAssetBalance(senderAccount, code);
+  if (!senderBalance) {
+    const e = new Error(`Sender does not hold ${code}; cannot fund this stream`);
+    e.code = 'STREAM_SENDER_BALANCE_INSUFFICIENT';
+    throw e;
+  }
+  if (Number(senderBalance.balance) < Number(rateAmount)) {
+    const e = new Error(
+      `Sender ${code} balance (${senderBalance.balance}) is below the stream rate (${rateAmount})`,
+    );
+    e.code = 'STREAM_SENDER_BALANCE_INSUFFICIENT';
+    throw e;
+  }
+
+  const recipientTrustline = findAssetBalance(recipientAccount, code);
+  if (!recipientTrustline) {
+    const e = new Error(`Recipient has no trustline for ${code}`);
+    e.code = 'STREAM_RECIPIENT_TRUSTLINE_MISSING';
+    throw e;
+  }
+  const limit = Number(recipientTrustline.limit);
+  const held = Number(recipientTrustline.balance || 0);
+  if (Number.isFinite(limit) && limit - held < Number(rateAmount)) {
+    const e = new Error(
+      `Recipient ${code} trustline limit (${recipientTrustline.limit}) is too low to receive the stream rate (${rateAmount})`,
+    );
+    e.code = 'STREAM_RECIPIENT_TRUSTLINE_INSUFFICIENT';
+    throw e;
+  }
+}
+
 /**
  * Create a new recurring payment stream backed by Soroban escrow (no stored secrets).
  * @param {object} params
@@ -125,6 +222,15 @@ export async function createStream({
   }
 
   rateAmount = validateRateAmount(rateAmount);
+
+  // Pre-flight: reject streams that cannot possibly pay for non-native assets
+  // (missing sender balance / recipient trustline) before marking them ACTIVE.
+  await validateStreamPreflight({
+    senderPublicKey,
+    recipientPublicKey,
+    assetCode,
+    rateAmount,
+  });
 
   const delegated = await createDelegatedStreamEscrow({
     senderPublicKey,

@@ -113,7 +113,11 @@ router.post('/', idempotencyMiddleware, streamRules.create, validate, async (req
     if (
       error.code === 'CUSTODIAL_SECRET_REJECTED' ||
       error.code === 'DELEGATED_STREAM_REQUIRED' ||
-      error.code === 'RATE_AMOUNT_INVALID'
+      error.code === 'RATE_AMOUNT_INVALID' ||
+      error.code === 'STREAM_SENDER_BALANCE_INSUFFICIENT' ||
+      error.code === 'STREAM_RECIPIENT_TRUSTLINE_MISSING' ||
+      error.code === 'STREAM_RECIPIENT_TRUSTLINE_INSUFFICIENT' ||
+      error.code === 'STREAM_PREFLIGHT_HORIZON_ERROR'
     ) {
       return res.status(400).json({ error: error.message, code: error.code });
     }
