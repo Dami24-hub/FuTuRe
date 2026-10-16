@@ -385,6 +385,8 @@ model OAuth2AuthorizationCode {
   client    OAuth2Client  @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
   userId    String
   scope     String
+  codeChallenge       String?
+  codeChallengeMethod String?
   expiresAt DateTime
   createdAt DateTime      @default(now())
 

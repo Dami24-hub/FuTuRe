@@ -39,6 +39,39 @@ function isValidIP(ip) {
   return isValidIPv4(ip) || isValidIPv6(ip);
 }
 
+function ipv4ToBigInt(ip) {
+  return ip.split('.').reduce((value, part) => (value << 8n) | BigInt(part), 0n);
+}
+
+function ipv6ToBigInt(ip) {
+  const [head, tail] = ip.split('::');
+  const left = head ? head.split(':').filter(Boolean) : [];
+  const right = tail ? tail.split(':').filter(Boolean) : [];
+  const groups = [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  if (groups.length !== 8) return null;
+  return groups.reduce((value, group) => (value << 16n) | BigInt(`0x${group || '0'}`), 0n);
+}
+
+function ipToBigInt(ip) {
+  if (isValidIPv4(ip)) return { value: ipv4ToBigInt(ip), bits: 32 };
+  if (isValidIPv6(ip)) return { value: ipv6ToBigInt(ip), bits: 128 };
+  return null;
+}
+
+function isIPInCIDR(ip, cidr) {
+  const [network, prefixText] = cidr.split('/');
+  const addressValue = ipToBigInt(ip);
+  const networkValue = ipToBigInt(network);
+  const prefix = Number(prefixText);
+  if (!addressValue || !networkValue || addressValue.bits !== networkValue.bits || !Number.isInteger(prefix)) {
+    return false;
+  }
+  const mask = prefix === 0
+    ? 0n
+    : ((1n << BigInt(addressValue.bits)) - 1n) << BigInt(addressValue.bits - prefix);
+  return (addressValue.value & mask) === (networkValue.value & mask);
+}
+
 // Initialize cache from database
 async function initializeCache() {
   if (cacheInitialized) return;
@@ -74,7 +107,12 @@ async function initializeCache() {
 // Check if IP is whitelisted
 function isWhitelisted(ip) {
   if (!ip) return false;
-  return whitelistedIPsCache.has(ip);
+  if (whitelistedIPsCache.has(ip)) return true;
+  for (const [entryIp, entry] of whitelistedIPsCache.entries()) {
+    const cidr = entry?.cidr || (entryIp.includes('/') ? entryIp : null);
+    if (cidr && isIPInCIDR(ip, cidr)) return true;
+  }
+  return false;
 }
 
 // Add IP to whitelist
@@ -173,6 +211,7 @@ export {
   clearWhitelist,
   initializeCache,
   isValidIP,
+  isIPInCIDR,
 };
 
 export default {
@@ -183,4 +222,5 @@ export default {
   clearWhitelist,
   initializeCache,
   isValidIP,
+  isIPInCIDR,
 };
