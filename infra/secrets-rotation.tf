@@ -47,6 +47,12 @@ resource "aws_iam_role_policy" "secrets_rotation" {
           aws_secretsmanager_secret.backup_enc_key.arn
         ]
       },
+      # Allow applying rotated database passwords to the RDS instance
+      {
+        Effect   = "Allow"
+        Action   = "rds:ModifyDBInstance"
+        Resource = aws_db_instance.postgres.arn
+      },
       # Allow forcing new ECS deployment for the backend service
       {
         Effect = "Allow"
@@ -77,6 +83,8 @@ resource "aws_lambda_function" "secrets_rotation" {
     variables = {
       ECS_CLUSTER = aws_ecs_cluster.main.name
       ECS_SERVICE = aws_ecs_service.backend.name
+      # Fallback for JSON DB secrets that lack a dbInstanceIdentifier field
+      DB_INSTANCE_IDENTIFIER = aws_db_instance.postgres.identifier
     }
   }
 
