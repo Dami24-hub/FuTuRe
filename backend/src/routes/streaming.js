@@ -114,7 +114,11 @@ router.post('/', idempotencyMiddleware, streamRules.create, validate, async (req
     if (
       error.code === 'CUSTODIAL_SECRET_REJECTED' ||
       error.code === 'DELEGATED_STREAM_REQUIRED' ||
-      error.code === 'RATE_AMOUNT_INVALID'
+      error.code === 'RATE_AMOUNT_INVALID' ||
+      error.code === 'STREAM_SENDER_BALANCE_INSUFFICIENT' ||
+      error.code === 'STREAM_RECIPIENT_TRUSTLINE_MISSING' ||
+      error.code === 'STREAM_RECIPIENT_TRUSTLINE_INSUFFICIENT' ||
+      error.code === 'STREAM_PREFLIGHT_HORIZON_ERROR'
     ) {
       return res.status(400).json({ error: error.message, code: error.code });
     }
@@ -461,9 +465,14 @@ router.get('/:id/failures', streamRules.idParam, validate, requireStreamAccess, 
  */
 router.post('/:id/cancel', streamRules.idParam, validate, requireStreamAccess, requireStreamOwner, async (req, res) => {
   try {
-    const stream = await StreamingService.cancelStream(req.params.id);
+    const settleProrated =
+      req.body?.settleProrated === true || req.query?.settleProrated === 'true';
+    const stream = await StreamingService.cancelStream(req.params.id, { settleProrated });
     res.json(withNextPaymentAt(stream));
   } catch (error) {
+    if (error.code === 'STREAM_PRORATED_SETTLEMENT_FAILED') {
+      return res.status(502).json({ error: error.message, code: error.code });
+    }
     res.status(500).json({ error: error.message });
   }
 });

@@ -7,6 +7,7 @@ import { getSubscriptionByPublicKey, sendWebPush } from '../notifications/webPus
 import { createRedisBackend } from '../cache/redis.js';
 import { incrementCounter, recordStreamingWorkerDuration } from '../monitoring/metrics.js';
 import { createDelegatedStreamEscrow, tickStreamPayment } from './streamContract.js';
+import { horizonServer } from '../config/stellar.js';
 
 export { prisma };
 
@@ -110,6 +111,105 @@ export function validateRateAmount(rateAmount) {
   return value;
 }
 
+/** Smallest prorated settlement we will execute (1 stroop). */
+export const MIN_PRORATED_SETTLEMENT = 0.0000001;
+
+/** Native Stellar assets do not require a trustline. */
+const NATIVE_ASSET_CODES = new Set(['', 'XLM', 'NATIVE']);
+
+/**
+ * @param {string} [assetCode]
+ * @returns {boolean} true when the asset is the native XLM asset
+ */
+export function isNativeAsset(assetCode) {
+  return NATIVE_ASSET_CODES.has(String(assetCode ?? '').toUpperCase());
+}
+
+/**
+ * Locate a balance/trustline entry for an asset on a Horizon account response.
+ * @param {object} account Horizon account record
+ * @param {string} assetCode
+ * @returns {object|undefined}
+ */
+function findAssetBalance(account, assetCode) {
+  const code = String(assetCode).toUpperCase();
+  return (account?.balances || []).find(
+    (b) => String(b.asset_code ?? '').toUpperCase() === code,
+  );
+}
+
+/**
+ * Pre-flight validation for stream creation. Rejects non-viable streams before
+ * they are persisted as ACTIVE so the first worker tick cannot fail on
+ * op_no_trust / op_underfunded.
+ *
+ * For non-native assets:
+ *  - the sender must hold the asset with a balance of at least one interval
+ *  - the recipient must have an established trustline for the asset
+ *
+ * @param {object} params
+ * @param {string} params.senderPublicKey
+ * @param {string} params.recipientPublicKey
+ * @param {string} [params.assetCode]
+ * @param {number} params.rateAmount
+ * @throws {Error} code STREAM_SENDER_BALANCE_INSUFFICIENT | STREAM_RECIPIENT_TRUSTLINE_MISSING | STREAM_PREFLIGHT_HORIZON_ERROR
+ */
+export async function validateStreamPreflight({
+  senderPublicKey,
+  recipientPublicKey,
+  assetCode,
+  rateAmount,
+}) {
+  if (isNativeAsset(assetCode)) return;
+
+  const code = String(assetCode).toUpperCase();
+
+  let senderAccount;
+  let recipientAccount;
+  try {
+    [senderAccount, recipientAccount] = await Promise.all([
+      horizonServer.loadAccount(senderPublicKey),
+      horizonServer.loadAccount(recipientPublicKey),
+    ]);
+  } catch (err) {
+    const e = new Error(
+      `Unable to verify stream viability on Horizon: ${err.message}`,
+    );
+    e.code = 'STREAM_PREFLIGHT_HORIZON_ERROR';
+    throw e;
+  }
+
+  const senderBalance = findAssetBalance(senderAccount, code);
+  if (!senderBalance) {
+    const e = new Error(`Sender does not hold ${code}; cannot fund this stream`);
+    e.code = 'STREAM_SENDER_BALANCE_INSUFFICIENT';
+    throw e;
+  }
+  if (Number(senderBalance.balance) < Number(rateAmount)) {
+    const e = new Error(
+      `Sender ${code} balance (${senderBalance.balance}) is below the stream rate (${rateAmount})`,
+    );
+    e.code = 'STREAM_SENDER_BALANCE_INSUFFICIENT';
+    throw e;
+  }
+
+  const recipientTrustline = findAssetBalance(recipientAccount, code);
+  if (!recipientTrustline) {
+    const e = new Error(`Recipient has no trustline for ${code}`);
+    e.code = 'STREAM_RECIPIENT_TRUSTLINE_MISSING';
+    throw e;
+  }
+  const limit = Number(recipientTrustline.limit);
+  const held = Number(recipientTrustline.balance || 0);
+  if (Number.isFinite(limit) && limit - held < Number(rateAmount)) {
+    const e = new Error(
+      `Recipient ${code} trustline limit (${recipientTrustline.limit}) is too low to receive the stream rate (${rateAmount})`,
+    );
+    e.code = 'STREAM_RECIPIENT_TRUSTLINE_INSUFFICIENT';
+    throw e;
+  }
+}
+
 /**
  * Create a new recurring payment stream backed by Soroban escrow (no stored secrets).
  * @param {object} params
@@ -148,6 +248,15 @@ export async function createStream({
   }
 
   rateAmount = validateRateAmount(rateAmount);
+
+  // Pre-flight: reject streams that cannot possibly pay for non-native assets
+  // (missing sender balance / recipient trustline) before marking them ACTIVE.
+  await validateStreamPreflight({
+    senderPublicKey,
+    recipientPublicKey,
+    assetCode,
+    rateAmount,
+  });
 
   const delegated = await createDelegatedStreamEscrow({
     senderPublicKey,
@@ -259,21 +368,90 @@ export async function resumeStream(id) {
 }
 
 /**
+ * Compute the prorated amount owed for the elapsed portion of the current
+ * active interval. Capped at one full interval and rounded down to 7 decimal
+ * places (Stellar's maximum precision).
+ * @param {import('@prisma/client').PaymentStream} stream
+ * @returns {Promise<{amount: number, hash: string|null}>}
+ */
+async function computeProratedSettlement(stream) {
+  const intervalSeconds = Number(stream.intervalSeconds) || 0;
+  if (intervalSeconds <= 0) return { amount: 0, hash: null };
+
+  const elapsedSeconds = (Date.now() - new Date(stream.lastProcessedAt).getTime()) / 1000;
+  if (!(elapsedSeconds > 0)) return { amount: 0, hash: null };
+
+  const rate = Number(stream.rateAmount);
+  let amount = (rate * elapsedSeconds) / intervalSeconds;
+  amount = Math.min(amount, rate);
+  amount = Math.floor(amount * 1e7) / 1e7;
+
+  if (amount < MIN_PRORATED_SETTLEMENT) return { amount: 0, hash: null };
+
+  let hash = null;
+  if (stream.escrowContractId && stream.contractStreamId) {
+    const result = await tickStreamPayment(stream.escrowContractId, stream.contractStreamId);
+    if (!result || result.success === false) {
+      const err = new Error('Prorated settlement payment failed');
+      err.code = 'STREAM_PRORATED_SETTLEMENT_FAILED';
+      throw err;
+    }
+    hash = result.hash ?? null;
+  }
+
+  return { amount, hash };
+}
+
+/**
  * Permanently cancel a payment stream. Cancelled streams cannot be resumed.
  * @param {number} id - Primary key of the PaymentStream record
+ * @param {{settleProrated?: boolean}} [options] - When settleProrated is true, a
+ *   final prorated payment is released for the elapsed portion of the current interval.
  * @returns {Promise<import('@prisma/client').PaymentStream>} Updated stream record with status 'CANCELLED'
  * @throws {Error} If the stream does not exist or the DB update fails
  */
-export async function cancelStream(id) {
+export async function cancelStream(id, options = {}) {
+  const { settleProrated = false } = typeof options === 'boolean' ? { settleProrated: options } : options;
+
+  const existing = await prisma.paymentStream.findUnique({
+    where: { id },
+    include: { sender: true },
+  });
+  if (!existing) throw new Error('Stream not found');
+
+  let settlement = { amount: 0, hash: null };
+  if (settleProrated) {
+    settlement = await computeProratedSettlement(existing);
+  }
+
+  const updateData = { status: 'CANCELLED' };
+  if (settlement.amount >= MIN_PRORATED_SETTLEMENT) {
+    updateData.totalStreamed = { increment: settlement.amount };
+    updateData.lastProcessedAt = new Date();
+  }
+
   const stream = await prisma.paymentStream.update({
     where: { id },
-    data: { status: 'CANCELLED' },
+    data: updateData,
     include: { sender: true },
   });
 
+  if (settlement.amount >= MIN_PRORATED_SETTLEMENT) {
+    await eventMonitor.publishEvent(stream.sender.publicKey, {
+      type: 'StreamSettled',
+      data: {
+        streamId: id,
+        amount: settlement.amount,
+        prorated: true,
+        hash: settlement.hash,
+      },
+      version: 1,
+    });
+  }
+
   await eventMonitor.publishEvent(stream.sender.publicKey, {
     type: 'StreamCancelled',
-    data: { streamId: id },
+    data: { streamId: id, settlementAmount: settlement.amount },
     version: 1,
   });
 
