@@ -180,6 +180,82 @@ describe('Load Testing Framework', () => {
       expect(scaling.projectedThroughput).toBeGreaterThan(scaling.currentThroughput);
       expect(scaling.recommendations.length).toBeGreaterThan(0);
     });
+
+    it('should return finite metrics when avgResponseTime is zero (#1412)', () => {
+      const results = {
+        avgResponseTime: 0,
+        errorRate: 1,
+        throughput: 100
+      };
+
+      const capacity = capacityPlanner.calculateCapacity(results);
+
+      expect(Number.isFinite(capacity.currentThroughput)).toBe(true);
+      expect(Number.isFinite(capacity.maxSafeThroughput)).toBe(true);
+      expect(Number.isFinite(capacity.maxCapacity)).toBe(true);
+      expect(Number.isFinite(capacity.headroom)).toBe(true);
+      expect(Number.isNaN(capacity.currentThroughput)).toBe(false);
+      expect(Number.isNaN(capacity.maxSafeThroughput)).toBe(false);
+      expect(Number.isNaN(capacity.maxCapacity)).toBe(false);
+      expect(Number.isNaN(capacity.headroom)).toBe(false);
+      expect(capacity.currentThroughput).not.toBe(Infinity);
+      expect(capacity.maxSafeThroughput).not.toBe(Infinity);
+      expect(capacity.maxCapacity).not.toBe(Infinity);
+      expect(capacity.headroom).not.toBe(Infinity);
+    });
+
+    it('should return zeroed result when currentThroughput is zero (#1412)', () => {
+      const results = {
+        avgResponseTime: 100,
+        errorRate: 1,
+        throughput: 0
+      };
+
+      const capacity = capacityPlanner.calculateCapacity(results);
+
+      expect(capacity.currentThroughput).toBe(0);
+      expect(capacity.maxSafeThroughput).toBe(0);
+      expect(capacity.maxCapacity).toBe(0);
+      expect(capacity.headroom).toBe(0);
+      expect(Array.isArray(capacity.recommendations)).toBe(true);
+      expect(Number.isFinite(capacity.currentThroughput)).toBe(true);
+      expect(Number.isFinite(capacity.maxSafeThroughput)).toBe(true);
+      expect(Number.isFinite(capacity.maxCapacity)).toBe(true);
+      expect(Number.isFinite(capacity.headroom)).toBe(true);
+    });
+
+    it('should handle negative inputs without NaN or Infinity (#1412)', () => {
+      const results = {
+        avgResponseTime: -50,
+        errorRate: -5,
+        throughput: -10
+      };
+
+      const capacity = capacityPlanner.calculateCapacity(results);
+
+      expect(Number.isFinite(capacity.currentThroughput)).toBe(true);
+      expect(Number.isFinite(capacity.maxSafeThroughput)).toBe(true);
+      expect(Number.isFinite(capacity.maxCapacity)).toBe(true);
+      expect(Number.isFinite(capacity.headroom)).toBe(true);
+      expect(Number.isNaN(capacity.currentThroughput)).toBe(false);
+      expect(Number.isNaN(capacity.maxSafeThroughput)).toBe(false);
+      expect(Number.isNaN(capacity.maxCapacity)).toBe(false);
+      expect(Number.isNaN(capacity.headroom)).toBe(false);
+      expect(capacity.currentThroughput).not.toBe(Infinity);
+      expect(capacity.maxSafeThroughput).not.toBe(Infinity);
+      expect(capacity.maxCapacity).not.toBe(Infinity);
+      expect(capacity.headroom).not.toBe(Infinity);
+    });
+
+    it('should return finite scaling metrics for zero current throughput (#1412)', () => {
+      const scaling = capacityPlanner.estimateScalingNeeds(0, 0.2, 12);
+
+      expect(Number.isFinite(Number(scaling.scalingFactor))).toBe(true);
+      expect(Number.isNaN(Number(scaling.scalingFactor))).toBe(false);
+      expect(Number.isFinite(scaling.projectedThroughput)).toBe(true);
+      expect(Number.isNaN(scaling.projectedThroughput)).toBe(false);
+      expect(scaling.projectedThroughput).not.toBe(Infinity);
+    });
   });
 
   describe('PerformanceAlerting', () => {
