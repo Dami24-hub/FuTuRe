@@ -805,6 +805,26 @@ model ComplianceReport {
   @@index([generatedAt])
 }
 
+// ─── Penetration Test Results (#1405) ────────────────────────────────────────
+
+// Durable storage for penetration test / security scan artifacts. Replaces the
+// ephemeral local-disk writes to backend/data/pentests/ in
+// security/penetrationTester.js so results survive container recycles and are
+// visible to every cluster node. Large payloads / full execution logs are
+// uploaded to the compliance S3 bucket and referenced via s3Key.
+model SecurityScanResult {
+  id        String   @id @default(uuid())
+  testId    String   @unique // e.g. PENTEST-<timestamp>
+  timestamp DateTime @default(now())
+  results   Json     // full result payload
+  summary   Json     // pass/fail/critical counts
+  s3Key     String?  // S3 object key for large payloads / execution logs
+  createdAt DateTime @default(now())
+
+  @@index([testId])
+  @@index([timestamp])
+}
+
 // ─── Multi-Sig Pending Transactions (#1287) ──────────────────────────────────
 
 // Envelopes awaiting signatures from multiple signers. Rows past expiresAt are
