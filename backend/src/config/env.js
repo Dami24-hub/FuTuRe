@@ -403,6 +403,16 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
     throw new Error('BIOMETRIC_REAUTH_THRESHOLD_XLM must be a positive number');
   }
 
+  // Max consecutive stream payment failures before marking a stream FAILED.
+  // Documented default is 5; override via STREAM_MAX_CONSECUTIVE_FAILURES.
+  const streamMaxConsecutiveFailures = parseInteger(env.STREAM_MAX_CONSECUTIVE_FAILURES, {
+    envVarName: 'STREAM_MAX_CONSECUTIVE_FAILURES',
+    defaultValue: 5,
+  });
+  if (!Number.isInteger(streamMaxConsecutiveFailures) || streamMaxConsecutiveFailures < 1) {
+    throw new Error('STREAM_MAX_CONSECUTIVE_FAILURES must be a positive integer');
+  }
+
   return {
     meta: {
       schemaVersion: CONFIG_SCHEMA_VERSION,
@@ -450,6 +460,7 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
     email: {
       from: emailFrom,
       dkim,
+    },
     aml: {
       largeThreshold: parseFloatEnv(env.AML_LARGE_TX_THRESHOLD, {
         envVarName: 'AML_LARGE_TX_THRESHOLD',
@@ -525,6 +536,9 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
     mobile: {
       webauthnRpId: env.WEBAUTHN_RP_ID || 'future.app',
       jwtSecret: env.MOBILE_JWT_SECRET || env.JWT_SECRET || '',
+    },
+    streaming: {
+      maxConsecutiveFailures: streamMaxConsecutiveFailures,
     },
   };
 }

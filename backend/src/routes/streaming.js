@@ -5,6 +5,7 @@ import * as StreamingService from '../services/streaming.js';
 import logger from '../config/logger.js';
 import { idempotencyMiddleware } from '../middleware/idempotency.js';
 import { requireAuth } from '../middleware/auth.js';
+import { requireStreamAccess, requireStreamOwner } from '../middleware/streamAuth.js';
 
 const router = express.Router();
 
@@ -280,14 +281,9 @@ router.get('/analytics', async (req, res) => {
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.get('/:id', streamRules.idParam, validate, async (req, res) => {
+router.get('/:id', streamRules.idParam, validate, requireStreamAccess, async (req, res) => {
   try {
-    const stream = await StreamingService.prisma.paymentStream.findUnique({
-      where: { id: req.params.id },
-      include: { sender: true, recipient: true },
-    });
-    if (!stream) return res.status(404).json({ error: 'Stream not found' });
-    res.json(withNextPaymentAt(stream));
+    res.json(withNextPaymentAt(req.stream));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -333,7 +329,7 @@ router.get('/:id', streamRules.idParam, validate, async (req, res) => {
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.post('/:id/pause', streamRules.idParam, validate, async (req, res) => {
+router.post('/:id/pause', streamRules.idParam, validate, requireStreamAccess, requireStreamOwner, async (req, res) => {
   try {
     const stream = await StreamingService.pauseStream(req.params.id);
     res.json(withNextPaymentAt(stream));
@@ -382,7 +378,7 @@ router.post('/:id/pause', streamRules.idParam, validate, async (req, res) => {
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.post('/:id/resume', streamRules.idParam, validate, async (req, res) => {
+router.post('/:id/resume', streamRules.idParam, validate, requireStreamAccess, requireStreamOwner, async (req, res) => {
   try {
     const stream = await StreamingService.resumeStream(req.params.id);
     res.json(withNextPaymentAt(stream));
@@ -413,13 +409,8 @@ router.post('/:id/resume', streamRules.idParam, validate, async (req, res) => {
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.get('/:id/failures', streamRules.idParam, validate, async (req, res) => {
+router.get('/:id/failures', streamRules.idParam, validate, requireStreamAccess, async (req, res) => {
   try {
-    const stream = await StreamingService.prisma.paymentStream.findUnique({
-      where: { id: req.params.id },
-    });
-    if (!stream) return res.status(404).json({ error: 'Stream not found' });
-
     const failures = await StreamingService.getStreamFailures(req.params.id);
     res.json(failures);
   } catch (error) {
@@ -468,7 +459,7 @@ router.get('/:id/failures', streamRules.idParam, validate, async (req, res) => {
  *       500:
  *         $ref: '#/components/responses/InternalServerError'
  */
-router.post('/:id/cancel', streamRules.idParam, validate, async (req, res) => {
+router.post('/:id/cancel', streamRules.idParam, validate, requireStreamAccess, requireStreamOwner, async (req, res) => {
   try {
     const stream = await StreamingService.cancelStream(req.params.id);
     res.json(withNextPaymentAt(stream));
@@ -531,7 +522,7 @@ router.patch('/:id', streamRules.idParam, [
   body('rateAmount').optional().isFloat({ gt: 0 }).withMessage('rateAmount must be a positive number'),
   body('intervalSeconds').optional().isInt({ min: 10 }).withMessage('intervalSeconds must be at least 10'),
   body('endTime').optional().isISO8601().withMessage('endTime must be a valid ISO8601 date'),
-], validate, async (req, res) => {
+], validate, requireStreamAccess, requireStreamOwner, async (req, res) => {
   try {
     const stream = await StreamingService.updateStream(req.params.id, req.body);
     res.json(withNextPaymentAt(stream));
