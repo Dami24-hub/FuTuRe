@@ -9,9 +9,115 @@ import {
   databaseFailureSimulator,
   recoveryTimeAnalyzer,
   blastRadiusLimiter,
+  BlastRadiusLimiter,
   chaosTestAutomation,
   chaosReporter
 } from '../src/chaos/index.js';
+
+/**
+ * Minimal in-memory mock of the Redis client used by BlastRadiusLimiter.
+ * It emulates the atomic primitives (HINCRBY, HGETALL, SET NX, EVAL) so the
+ * distributed safety checks can be exercised without a live Redis server.
+ */
+class MockRedis {
+  constructor() {
+    this.hashes = new Map();
+    this.strings = new Map();
+    this.locks = new Map();
+  }
+
+  _hash(key) {
+    if (!this.hashes.has(key)) {
+      this.hashes.set(key, new Map());
+    }
+    return this.hashes.get(key);
+  }
+
+  async hincrby(key, field, increment) {
+    const hash = this._hash(key);
+    const current = Number(hash.get(field) || 0);
+    const next = current + Number(increment);
+    hash.set(field, next);
+    return next;
+  }
+
+  async hset(key, field, value) {
+    this._hash(key).set(field, value);
+    return 1;
+  }
+
+  async hget(key, field) {
+    const hash = this.hashes.get(key);
+    if (!hash) return null;
+    const value = hash.get(field);
+    return value === undefined ? null : value;
+  }
+
+  async hgetall(key) {
+    const hash = this.hashes.get(key);
+    if (!hash) return {};
+    return Object.fromEntries(hash.entries());
+  }
+
+  async hdel(key, field) {
+    const hash = this.hashes.get(key);
+    if (!hash) return 0;
+    return hash.delete(field) ? 1 : 0;
+  }
+
+  async del(key) {
+    const existed = this.hashes.delete(key) || this.strings.delete(key);
+    return existed ? 1 : 0;
+  }
+
+  async set(key, value, options = {}) {
+    if (options && options.NX && this.strings.has(key)) {
+      return null;
+    }
+    this.strings.set(key, value);
+    return 'OK';
+  }
+
+  async get(key) {
+    const value = this.strings.get(key);
+    return value === undefined ? null : value;
+  }
+
+  async eval(script, keys, args) {
+    // Emulates the atomic "check-and-reserve" Lua script used by the limiter.
+    const [servicesKey, errorRateKey] = keys;
+    const [maxServices, maxErrorRate, requestedServices, requestedErrorRate] = args.map(Number);
+
+    const servicesHash = this.hashes.get(servicesKey) || new Map();
+    const currentServices = Number(servicesHash.get('total') || 0);
+    const currentErrorRate = Number(this.strings.get(errorRateKey) || 0);
+
+    const projectedServices = currentServices + requestedServices;
+    const projectedErrorRate = currentErrorRate + requestedErrorRate;
+
+    if (projectedServices > maxServices) {
+      return [0, 'MAX_AFFECTED_SERVICES_EXCEEDED', currentServices, currentErrorRate];
+    }
+    if (projectedErrorRate > maxErrorRate) {
+      return [0, 'MAX_ERROR_RATE_EXCEEDED', currentServices, currentErrorRate];
+    }
+
+    servicesHash.set('total', projectedServices);
+    this.hashes.set(servicesKey, servicesHash);
+    this.strings.set(errorRateKey, projectedErrorRate);
+
+    return [1, 'OK', projectedServices, projectedErrorRate];
+  }
+}
+
+function createLimiter(redis) {
+  // Prefer the class export when available so each simulated node gets its own
+  // instance; fall back to the shared singleton otherwise.
+  if (typeof BlastRadiusLimiter === 'function') {
+    return new BlastRadiusLimiter(redis);
+  }
+  return blastRadiusLimiter;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '../data');
@@ -185,6 +291,103 @@ describe('Chaos Engineering', () => {
       const impact = blastRadiusLimiter.recordImpact('fail-1', ['api', 'db'], 5, 1000);
       
       expect(impact.withinLimits).toBe(true);
+    });
+  });
+
+  describe('BlastRadiusLimiter (distributed / cross-node)', () => {
+    let redis;
+
+    beforeEach(() => {
+      redis = new MockRedis();
+    });
+
+    it('should atomically track total active disrupted services in Redis', async () => {
+      const node = createLimiter(redis);
+      node.setLimit('global', 10, 100);
+
+      const result = await node.canInjectFailure('fail-1', ['api', 'db'], 5);
+      expect(result.allowed).toBe(true);
+
+      const stored = await redis.hgetall('chaos:blast-radius:services');
+      expect(Number(stored.total)).toBe(2);
+    });
+
+    it('should enforce global max affected services across separate instances', async () => {
+      const nodeA = createLimiter(redis);
+      const nodeB = createLimiter(redis);
+      const nodeC = createLimiter(redis);
+
+      nodeA.setLimit('global', 4, 100);
+      nodeB.setLimit('global', 4, 100);
+      nodeC.setLimit('global', 4, 100);
+
+      // Simulate three concurrent chaos requests from three separate nodes.
+      const results = await Promise.all([
+        nodeA.canInjectFailure('fail-a', ['api', 'db'], 5),
+        nodeB.canInjectFailure('fail-b', ['cache', 'queue'], 5),
+        nodeC.canInjectFailure('fail-c', ['search', 'auth'], 5)
+      ]);
+
+      const allowed = results.filter((r) => r.allowed);
+      const rejected = results.filter((r) => !r.allowed);
+
+      // Only two injections (4 services) fit within the global limit of 4.
+      expect(allowed.length).toBe(2);
+      expect(rejected.length).toBe(1);
+      expect(rejected[0].reason).toBeDefined();
+
+      const stored = await redis.hgetall('chaos:blast-radius:services');
+      expect(Number(stored.total)).toBeLessThanOrEqual(4);
+    });
+
+    it('should abort experiments when the global error rate threshold is breached', async () => {
+      const nodeA = createLimiter(redis);
+      const nodeB = createLimiter(redis);
+
+      nodeA.setLimit('global', 100, 10);
+      nodeB.setLimit('global', 100, 10);
+
+      const first = await nodeA.canInjectFailure('fail-a', ['api'], 6);
+      expect(first.allowed).toBe(true);
+
+      const second = await nodeB.canInjectFailure('fail-b', ['db'], 6);
+      expect(second.allowed).toBe(false);
+      expect(second.reason).toBeDefined();
+
+      const cumulativeErrorRate = Number(await redis.get('chaos:blast-radius:error-rate'));
+      expect(cumulativeErrorRate).toBeLessThanOrEqual(10);
+    });
+
+    it('should respect cumulative error rate across concurrent injections', async () => {
+      const nodes = [createLimiter(redis), createLimiter(redis), createLimiter(redis)];
+      nodes.forEach((n) => n.setLimit('global', 100, 15));
+
+      const results = await Promise.all(
+        nodes.map((n, i) => n.canInjectFailure(`fail-${i}`, [`svc-${i}`], 6))
+      );
+
+      const allowed = results.filter((r) => r.allowed);
+      const rejected = results.filter((r) => !r.allowed);
+
+      expect(allowed.length).toBe(2);
+      expect(rejected.length).toBe(1);
+
+      const cumulativeErrorRate = Number(await redis.get('chaos:blast-radius:error-rate'));
+      expect(cumulativeErrorRate).toBeLessThanOrEqual(15);
+    });
+
+    it('should not double-count services when the same node retries a rejected injection', async () => {
+      const node = createLimiter(redis);
+      node.setLimit('global', 2, 100);
+
+      const first = await node.canInjectFailure('fail-1', ['api', 'db'], 5);
+      expect(first.allowed).toBe(true);
+
+      const second = await node.canInjectFailure('fail-2', ['cache'], 5);
+      expect(second.allowed).toBe(false);
+
+      const stored = await redis.hgetall('chaos:blast-radius:services');
+      expect(Number(stored.total)).toBe(2);
     });
   });
 
