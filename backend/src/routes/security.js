@@ -258,6 +258,8 @@ router.post('/incidents/:id/action', async (req, res) => {
 // Penetration testing endpoints
 router.post('/pentest/run', async (req, res) => {
   try {
+    // runSecurityTests persists results to the database (SecurityScanResult)
+    // and returns the persisted results so all cluster nodes can read them.
     const results = await penetrationTester.runSecurityTests();
     res.json(results);
   } catch (error) {
@@ -266,6 +268,19 @@ router.post('/pentest/run', async (req, res) => {
 });
 
 router.get('/pentest/results', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 5;
+    // Reads from the database-backed SecurityScanResult table so historical
+    // scan results are available across all cluster nodes.
+    const results = await penetrationTester.getLatestResults(limit);
+    res.json({ results });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Alias endpoint for historical scan results (database-backed)
+router.get('/pentest/history', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 5;
     const results = await penetrationTester.getLatestResults(limit);
