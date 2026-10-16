@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,6 +12,7 @@ import {
   performanceAlerting,
   optimizationRecommender
 } from '../src/loadTesting/index.js';
+import { PerformanceAlertManager } from '../src/loadTesting/performanceAlerting.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '../data');
@@ -282,6 +283,143 @@ describe('Load Testing Framework', () => {
       performanceAlerting.checkMetrics(results);
       const file = await performanceAlerting.saveAlerts();
       expect(file).toBeDefined();
+    });
+  });
+
+  describe('PerformanceAlertManager distributed deduplication (#1414)', () => {
+    // In-memory emulation of Redis SET key value NX EX seconds.
+    function createRedisMock() {
+      const store = new Map();
+      return {
+        store,
+        setNX: vi.fn(async (key, value, ttlSeconds) => {
+          const existing = store.get(key);
+          if (existing && existing.expiresAt > Date.now()) {
+            return false;
+          }
+          store.set(key, {
+            value,
+            expiresAt: Date.now() + ttlSeconds * 1000
+          });
+          return true;
+        })
+      };
+    }
+
+    const breach = {
+      avgResponseTime: 2000,
+      p95ResponseTime: 3000,
+      errorRate: 10,
+      throughput: 5
+    };
+
+    it('dispatches exactly one alert across 5 concurrent workers sharing Redis', async () => {
+      const redis = createRedisMock();
+      const dispatched = [];
+
+      const workers = Array.from({ length: 5 }, () => {
+        const manager = new PerformanceAlertManager({
+          redis,
+          cooldownSeconds: 300,
+          onDispatch: (alert) => dispatched.push(alert)
+        });
+        return manager;
+      });
+
+      const results = await Promise.all(
+        workers.map((manager) => manager.checkMetrics({ ...breach }))
+      );
+
+      const totalAlerts = results.reduce((sum, alerts) => sum + alerts.length, 0);
+      expect(totalAlerts).toBe(1);
+      expect(dispatched).toHaveLength(1);
+    });
+
+    it('falls back to in-memory deduplication when Redis is not configured', async () => {
+      const dispatched = [];
+      const manager = new PerformanceAlertManager({
+        cooldownSeconds: 300,
+        onDispatch: (alert) => dispatched.push(alert)
+      });
+
+      const first = await manager.checkMetrics({ ...breach });
+      const second = await manager.checkMetrics({ ...breach });
+
+      expect(first.length).toBeGreaterThan(0);
+      expect(second).toHaveLength(0);
+      expect(dispatched).toHaveLength(1);
+    });
+
+    it('degrades gracefully to in-memory fallback when Redis setNX throws', async () => {
+      const dispatched = [];
+      const redis = {
+        setNX: vi.fn(async () => {
+          throw new Error('Redis connection lost');
+        })
+      };
+
+      const manager = new PerformanceAlertManager({
+        redis,
+        cooldownSeconds: 300,
+        onDispatch: (alert) => dispatched.push(alert)
+      });
+
+      const first = await manager.checkMetrics({ ...breach });
+      expect(first.length).toBeGreaterThan(0);
+
+      // Second call within cooldown should be deduplicated by the in-memory fallback.
+      const second = await manager.checkMetrics({ ...breach });
+      expect(second).toHaveLength(0);
+      expect(dispatched).toHaveLength(1);
+    });
+
+    it('dispatches a new alert after the cooldown expires', async () => {
+      const redis = createRedisMock();
+      const dispatched = [];
+      const manager = new PerformanceAlertManager({
+        redis,
+        cooldownSeconds: 1,
+        onDispatch: (alert) => dispatched.push(alert)
+      });
+
+      const first = await manager.checkMetrics({ ...breach });
+      expect(first.length).toBeGreaterThan(0);
+
+      // Expire the Redis keys to simulate cooldown elapsing.
+      for (const [key, entry] of redis.store.entries()) {
+        redis.store.set(key, { ...entry, expiresAt: Date.now() - 1 });
+      }
+
+      const second = await manager.checkMetrics({ ...breach });
+      expect(second.length).toBeGreaterThan(0);
+      expect(dispatched).toHaveLength(2);
+    });
+
+    it('consolidates multi-metric breaches across workers into one aggregated incident alert', async () => {
+      const redis = createRedisMock();
+      const dispatched = [];
+
+      const workers = Array.from({ length: 5 }, () => {
+        const manager = new PerformanceAlertManager({
+          redis,
+          cooldownSeconds: 300,
+          onDispatch: (alert) => dispatched.push(alert)
+        });
+        return manager;
+      });
+
+      const results = await Promise.all(
+        workers.map((manager) => manager.checkMetrics({ ...breach }))
+      );
+
+      const totalAlerts = results.reduce((sum, alerts) => sum + alerts.length, 0);
+      expect(totalAlerts).toBe(1);
+      expect(dispatched).toHaveLength(1);
+
+      const incident = dispatched[0];
+      expect(incident.aggregated).toBe(true);
+      expect(Array.isArray(incident.metrics)).toBe(true);
+      expect(incident.metrics.length).toBeGreaterThan(1);
     });
   });
 
