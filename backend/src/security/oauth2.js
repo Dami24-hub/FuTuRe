@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import { getConfig } from '../config/env.js';
 import prisma from '../db/client.js';
 
@@ -18,6 +18,27 @@ function timingSafeStringEqual(a, b) {
   return crypto.timingSafeEqual(aDigest, bDigest);
 }
 
+const PKCE_METHODS = new Set(['plain', 'S256']);
+
+function validatePkce(codeChallenge, codeChallengeMethod) {
+  if (codeChallenge == null && codeChallengeMethod == null) return;
+  if (typeof codeChallenge !== 'string' || !/^[A-Za-z0-9._~-]{43,128}$/.test(codeChallenge)) {
+    throw new Error('Invalid PKCE code challenge');
+  }
+  const method = codeChallengeMethod || 'plain';
+  if (!PKCE_METHODS.has(method)) throw new Error('Unsupported PKCE code challenge method');
+}
+
+function verifyPkce(codeVerifier, codeChallenge, codeChallengeMethod) {
+  if (!codeChallenge) return true;
+  if (typeof codeVerifier !== 'string' || !/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier)) return false;
+  if (codeChallengeMethod === 'S256') {
+    const digest = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    return timingSafeStringEqual(digest, codeChallenge);
+  }
+  return timingSafeStringEqual(codeVerifier, codeChallenge);
+}
+
 class OAuth2Provider {
   /**
    * Register a new OAuth2 client
@@ -29,7 +50,7 @@ class OAuth2Provider {
     return await prisma.oAuth2Client.create({
       data: {
         clientId,
-        clientSecret: hashedSecret,
+        clientSecretHash: hashedSecret,
         redirectUris
       }
     });
@@ -39,7 +60,8 @@ class OAuth2Provider {
    * Generate an authorization code for OAuth2 flow
    * Persists to database with 10-minute expiry (fixes #968)
    */
-  async generateAuthorizationCode(clientId, userId, scope) {
+  async generateAuthorizationCode(clientId, userId, scope, codeChallenge = null, codeChallengeMethod = null) {
+    validatePkce(codeChallenge, codeChallengeMethod);
     const code = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
@@ -49,6 +71,8 @@ class OAuth2Provider {
         clientId,
         userId,
         scope,
+        codeChallenge,
+        codeChallengeMethod: codeChallenge ? (codeChallengeMethod || 'plain') : null,
         expiresAt
       }
     });
@@ -60,41 +84,29 @@ class OAuth2Provider {
    * Exchange authorization code for access and refresh tokens
    * Validates code, issues tokens with database persistence (fixes #968, #967)
    */
-  async exchangeCodeForToken(code, clientId, clientSecret) {
-    // Find and validate authorization code
-    const authCode = await prisma.oAuth2AuthorizationCode.findUnique({
-      where: { code }
-    });
+  async exchangeCodeForToken(code, clientId, clientSecret, codeVerifier = null) {
+    const authCode = await prisma.$transaction(async (tx) => {
+      const candidate = await tx.oAuth2AuthorizationCode.findUnique({ where: { code } });
+      if (!candidate || candidate.expiresAt <= new Date()) {
+        throw new Error('Invalid or expired authorization code');
+      }
+      if (candidate.clientId !== clientId) throw new Error('Client ID mismatch');
 
-    if (!authCode || authCode.expiresAt < new Date()) {
-      throw new Error('Invalid or expired authorization code');
-    }
+      const client = await tx.oAuth2Client.findUnique({ where: { clientId } });
+      if (!client || !(await bcrypt.compare(clientSecret, client.clientSecretHash))) {
+        throw new Error('Invalid client credentials');
+      }
+      if (!verifyPkce(codeVerifier, candidate.codeChallenge, candidate.codeChallengeMethod)) {
+        throw new Error('Invalid PKCE code verifier');
+      }
 
-    if (authCode.clientId !== clientId) {
-      throw new Error('Client ID mismatch');
-    }
-
-    // Validate client credentials
-    const client = await prisma.oAuth2Client.findUnique({
-      where: { clientId }
-    });
-
-    if (!client) {
-      throw new Error('Invalid client credentials');
-    }
-
-    // Verify the incoming secret against the stored hash in constant time.
-    // bcrypt.compare is constant-time with respect to the stored hash, and the
-    // additional timingSafeEqual over fixed-length digests guarantees that the
-    // overall verification does not leak timing information.
-    const secretMatches = await bcrypt.compare(clientSecret, client.clientSecret);
-    if (!timingSafeStringEqual(clientSecret, clientSecret) || !secretMatches) {
-      throw new Error('Invalid client credentials');
-    }
-
-    // Delete used authorization code
-    await prisma.oAuth2AuthorizationCode.delete({
-      where: { code }
+      // Claim the code atomically. Concurrent exchanges may both read the
+      // candidate, but only one conditional delete can claim it.
+      const claimed = await tx.oAuth2AuthorizationCode.deleteMany({
+        where: { code, clientId, expiresAt: { gt: new Date() } },
+      });
+      if (claimed.count !== 1) throw new Error('Invalid or expired authorization code');
+      return candidate;
     });
 
     // Generate access token (short-lived JWT)
@@ -257,4 +269,5 @@ class OAuth2Provider {
   }
 }
 
+export { validatePkce, verifyPkce };
 export default new OAuth2Provider();
