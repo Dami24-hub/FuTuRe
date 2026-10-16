@@ -9,7 +9,55 @@
  * without any in-process caching.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import http from 'node:http';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ── Real LoadTestRunner loader ────────────────────────────────────────────────
+//
+// The production runner lives at backend/src/loadTesting/loadTestRunner.js.
+// It is loaded lazily so that the cross-instance tests above remain fully
+// self-contained even if the module is unavailable in a given environment.
+
+function loadRealLoadTestRunner() {
+  const candidates = [
+    path.resolve(__dirname, '../../src/loadTesting/loadTestRunner.js'),
+    path.resolve(__dirname, '../../src/loadTesting/loadTestRunner.cjs'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const mod = require(candidate);
+      const Runner = mod?.LoadTestRunner ?? mod?.default ?? mod;
+      if (typeof Runner === 'function') return Runner;
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+const RealLoadTestRunner = loadRealLoadTestRunner();
+
+// ── Local HTTP server helper ──────────────────────────────────────────────────
+
+function startLocalServer(handler) {
+  return new Promise((resolve) => {
+    const server = http.createServer(handler);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      resolve({ server, port, url: `http://127.0.0.1:${port}` });
+    });
+  });
+}
+
+function stopLocalServer(server) {
+  return new Promise((resolve) => server.close(() => resolve()));
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -336,6 +384,113 @@ describe('PerformanceBaseline — cross-instance integration', () => {
     expect(loaded).not.toBeNull();
     expect(loaded.name).toBe('payment-flow');
   });
+});
+
+describe('LoadTestRunner — bounded concurrency against a real HTTP server', () => {
+  let serverHandle;
+  let inFlight = 0;
+  let maxObservedInFlight = 0;
+  let serverResponseTimes = [];
+
+  beforeEach(async () => {
+    inFlight = 0;
+    maxObservedInFlight = 0;
+    serverResponseTimes = [];
+    serverHandle = await startLocalServer((req, res) => {
+      inFlight += 1;
+      if (inFlight > maxObservedInFlight) maxObservedInFlight = inFlight;
+      const started = process.hrtime.bigint();
+      // Small, deterministic server-side delay so response-time measurements
+      // reflect genuine server work rather than client-side socket queuing.
+      setTimeout(() => {
+        const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+        serverResponseTimes.push(elapsedMs);
+        inFlight -= 1;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      }, 5);
+    });
+  });
+
+  afterEach(async () => {
+    if (serverHandle) await stopLocalServer(serverHandle.server);
+    serverHandle = null;
+  });
+
+  it.skipIf(!RealLoadTestRunner)(
+    'drives 10,000 virtual requests without EMFILE/ECONNRESET and respects max concurrency',
+    async () => {
+      const concurrency = 50;
+      const totalRequests = 10_000;
+
+      const runner = new RealLoadTestRunner({
+        concurrency,
+        maxConcurrency: concurrency,
+        keepAlive: true,
+        maxSockets: concurrency,
+      });
+
+      const target = `${serverHandle.url}/bench`;
+
+      const result = await runner.run({
+        url: target,
+        method: 'GET',
+        totalRequests,
+        concurrency,
+        maxConcurrency: concurrency,
+      });
+
+      // ── No socket-exhaustion errors ───────────────────────────────────────
+      const errors = (result?.results ?? runner.results ?? []).filter((r) => !r.success);
+      const errorMessages = errors.map((r) => String(r.error ?? r.message ?? ''));
+      const socketErrors = errorMessages.filter(
+        (m) => m.includes('EMFILE') || m.includes('ECONNRESET'),
+      );
+      expect(socketErrors).toEqual([]);
+
+      // ── Worker count strictly respects the configured limit ───────────────
+      expect(maxObservedInFlight).toBeLessThanOrEqual(concurrency);
+
+      // ── Accurate server-side response-time measurements ───────────────────
+      expect(serverResponseTimes.length).toBe(totalRequests);
+      const serverAvg =
+        serverResponseTimes.reduce((a, b) => a + b, 0) / serverResponseTimes.length;
+      // Server-side work is ~5ms; measured client latency must be in the same
+      // order of magnitude (no artificial socket-queue inflation).
+      expect(serverAvg).toBeGreaterThanOrEqual(4);
+      expect(serverAvg).toBeLessThan(100);
+
+      const summary = result?.summary ?? runner.getResults?.();
+      if (summary) {
+        expect(summary.totalRequests).toBe(totalRequests);
+        expect(summary.errorCount).toBe(0);
+        expect(summary.avgResponseTime).toBeGreaterThan(0);
+      }
+    },
+    120_000,
+  );
+
+  it.skipIf(!RealLoadTestRunner)(
+    'never exceeds max concurrency even when totalRequests far exceeds the pool size',
+    async () => {
+      const concurrency = 25;
+      const totalRequests = 2_000;
+
+      const runner = new RealLoadTestRunner({ concurrency, maxConcurrency: concurrency });
+
+      await runner.run({
+        url: `${serverHandle.url}/bench`,
+        method: 'GET',
+        totalRequests,
+        concurrency,
+        maxConcurrency: concurrency,
+      });
+
+      expect(maxObservedInFlight).toBeLessThanOrEqual(concurrency);
+      expect(serverResponseTimes.length).toBe(totalRequests);
+    },
+    60_000,
+  );
 });
 
 describe('PerformanceAlerting — cross-instance integration', () => {

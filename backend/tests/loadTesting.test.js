@@ -237,7 +237,163 @@ describe('Load Testing Framework', () => {
     });
   });
 
+  describe('LoadTestRunner bounded concurrency (#166)', () => {
+    it('never exceeds the configured concurrency limit', async () => {
+      const http = await import('node:http');
+      let inFlight = 0;
+      let maxInFlight = 0;
+
+      const server = http.createServer((req, res) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        setTimeout(() => {
+          inFlight -= 1;
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          res.end('ok');
+        }, 40);
+      });
+
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address();
+
+      try {
+        const runner = new LoadTestRunner();
+        const scenario = new LoadTestScenario('bounded', 'Bounded concurrency');
+        scenario.setConcurrency(5).setDuration(1).setRampUp(0);
+        scenario.addRequest('GET', '/health');
+
+        const summary = await runner.runScenario(scenario, `http://127.0.0.1:${port}`);
+        expect(summary.totalRequests).toBeGreaterThan(5);
+        expect(maxInFlight).toBeLessThanOrEqual(5);
+      } finally {
+        await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+      }
+    });
+
+    it('does not surface EMFILE or ECONNRESET errors under high concurrency', async () => {
+      const http = await import('node:http');
+
+      const server = http.createServer((req, res) => {
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          res.end('ok');
+        }, 10);
+      });
+
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address();
+
+      try {
+        const runner = new LoadTestRunner();
+        const scenario = new LoadTestScenario('highConcurrency', 'High concurrency');
+        scenario.setConcurrency(200).setDuration(1).setRampUp(0);
+        scenario.addRequest('GET', '/health');
+
+        const summary = await runner.runScenario(scenario, `http://127.0.0.1:${port}`);
+        const errors = (summary.results || [])
+          .filter((r) => !r.success)
+          .map((r) => String(r.error || ''));
+        expect(errors.some((e) => /EMFILE|ECONNRESET/.test(e))).toBe(false);
+      } finally {
+        await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+      }
+    });
+
+    it('reuses a shared keep-alive agent across requests', async () => {
+      const http = await import('node:http');
+      const sockets = new Set();
+      let requestCount = 0;
+
+      const server = http.createServer((req, res) => {
+        requestCount += 1;
+        sockets.add(req.socket);
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          res.end('ok');
+        }, 10);
+      });
+
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address();
+
+      try {
+        const runner = new LoadTestRunner();
+        const scenario = new LoadTestScenario('keepAlive', 'Keep-alive reuse');
+        scenario.setConcurrency(4).setDuration(1).setRampUp(0);
+        scenario.addRequest('GET', '/health');
+
+        await runner.runScenario(scenario, `http://127.0.0.1:${port}`);
+        expect(requestCount).toBeGreaterThan(4);
+        expect(sockets.size).toBeLessThan(requestCount);
+      } finally {
+        await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+      }
+    });
+
+    it('paces request generation according to requestsPerSecond', async () => {
+      const http = await import('node:http');
+      const startTimes = [];
+
+      const server = http.createServer((req, res) => {
+        startTimes.push(Date.now());
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+      });
+
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address();
+
+      try {
+        const runner = new LoadTestRunner();
+        const scenario = new LoadTestScenario('paced', 'Paced requests');
+        scenario.setConcurrency(10).setDuration(1).setRampUp(0);
+        scenario.setRequestsPerSecond(20);
+        scenario.addRequest('GET', '/health');
+
+        const startedAt = Date.now();
+        await runner.runScenario(scenario, `http://127.0.0.1:${port}`);
+        const elapsed = (Date.now() - startedAt) / 1000;
+        const observedRate = startTimes.length / elapsed;
+        expect(observedRate).toBeLessThanOrEqual(20 * 1.5);
+      } finally {
+        await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+      }
+    });
+
+    it('measures server response time rather than client-side socket queuing', async () => {
+      const http = await import('node:http');
+      const serverDelay = 60;
+
+      const server = http.createServer((req, res) => {
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          res.end('ok');
+        }, serverDelay);
+      });
+
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address();
+
+      try {
+        const runner = new LoadTestRunner();
+        const scenario = new LoadTestScenario('latency', 'Latency accuracy');
+        scenario.setConcurrency(5).setDuration(1).setRampUp(0);
+        scenario.addRequest('GET', '/health');
+
+        const summary = await runner.runScenario(scenario, `http://127.0.0.1:${port}`);
+        const successful = (summary.results || []).filter((r) => r.success);
+        expect(successful.length).toBeGreaterThan(0);
+        const avg = successful.reduce((sum, r) => sum + r.responseTime, 0) / successful.length;
+        expect(avg).toBeGreaterThanOrEqual(serverDelay * 0.5);
+        expect(avg).toBeLessThan(serverDelay * 5);
+      } finally {
+        await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+      }
+    });
+  });
+
   describe('LoadTestRunner concurrency (#1114)', () => {
+=======
     it('issues multiple requests in flight for concurrency > 1', async () => {
       const http = await import('node:http');
       let inFlight = 0;
