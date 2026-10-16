@@ -19,7 +19,10 @@ import path from 'node:path';
 
 const STELLAR_SECRET_KEY_REGEX = /\bS[A-Z2-7]{55}\b/g;
 const JWT_REGEX = /\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/g;
-const EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+// Excludes retina image asset suffixes (e.g. logo@2x.png) and image/binary
+// file extensions so that asset references are not flagged as leaked emails.
+const EMAIL_REGEX =
+  /\b[A-Z0-9._%+-]+@(?!\d+x\b)[A-Z0-9.-]+\.(?!png\b|jpe?g\b|svg\b|webp\b|gif\b|ico\b)[A-Z]{2,}\b/gi;
 
 const ALLOWED_EMAIL_DOMAINS = new Set(['example.com', 'example.org', 'example.net']);
 

@@ -13,6 +13,46 @@ const router = express.Router();
 // documents 401 responses here); require a logged-in caller (#1102).
 router.use(requireAuth);
 
+// SSE keepalive heartbeat interval. The ALB idle_timeout is 300s, but
+// intermediate proxies and clients may drop connections that stay silent for
+// shorter periods. Emitting a comment heartbeat every 15s keeps bytes flowing
+// on idle streams (e.g. quiet Stellar accounts) so long-polling payment
+// streams are not terminated prematurely (#1442).
+const SSE_KEEPALIVE_INTERVAL_MS = 15000;
+
+/**
+ * Attach a periodic SSE comment heartbeat to a streaming response.
+ * Returns a cleanup function that clears the interval; callers must invoke it
+ * when the client disconnects to avoid leaking timers.
+ */
+function attachSseKeepalive(res, intervalMs = SSE_KEEPALIVE_INTERVAL_MS) {
+  const timer = setInterval(() => {
+    if (res.writableEnded || res.destroyed) {
+      clearInterval(timer);
+      return;
+    }
+    try {
+      // SSE comment line: ignored by clients but keeps the connection active.
+      res.write(':keepalive\n\n');
+    } catch (error) {
+      logger.error('streaming.route.keepalive.failed', { error: error.message });
+      clearInterval(timer);
+    }
+  }, intervalMs);
+
+  // Do not keep the event loop alive solely for heartbeats.
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+
+  const cleanup = () => clearInterval(timer);
+  res.on('close', cleanup);
+  res.on('finish', cleanup);
+  res.on('error', cleanup);
+
+  return cleanup;
+}
+
 function withNextPaymentAt(stream) {
   return {
     ...stream,
