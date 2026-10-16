@@ -11,3 +11,4 @@ export {
   createAlertRedisBackend,
   getAlertRedisBackend,
 } from './performanceAlerting.js';
+export { createSemaphore, createRateLimiter } from './loadTestRunner.js';

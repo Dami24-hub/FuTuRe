@@ -2,20 +2,157 @@ import crypto from 'crypto';
 import * as StellarSDK from '@stellar/stellar-sdk';
 import { horizonServer, networkPassphrase } from '../config/stellar.js';
 import * as StellarService from '../services/stellar.js';
+import prisma from '../db/client.js';
+import { createRedisBackend } from '../cache/redis.js';
+import logger from '../config/logger.js';
+
+const REDIS_QUEUE_PREFIX = 'mobile:queue:';
+const REDIS_QUEUE_TTL_SECONDS = 60 * 60 * 24;
+
+/** Maximum number of pending items a single user may keep queued. */
+export const MAX_OFFLINE_QUEUE_ITEMS = 50;
+/** Maximum serialized size of a single queued transaction (bytes). */
+export const MAX_PAYLOAD_BYTES = 10_000;
+
+/**
+ * Validate that a transaction payload is within the accepted byte budget.
+ * @param {unknown} transaction
+ * @throws {Error} code OFFLINE_QUEUE_PAYLOAD_TOO_LARGE
+ */
+export function validatePayloadSize(transaction) {
+  const bytes = Buffer.byteLength(JSON.stringify(transaction ?? null), 'utf8');
+  if (bytes > MAX_PAYLOAD_BYTES) {
+    const err = new Error(
+      `Offline transaction payload too large (max ${MAX_PAYLOAD_BYTES} bytes)`,
+    );
+    err.code = 'OFFLINE_QUEUE_PAYLOAD_TOO_LARGE';
+    throw err;
+  }
+  return bytes;
+}
 
 /**
  * Offline transaction queue.
  * Clients enqueue transactions while offline; the server processes them
  * in order when the client reconnects and calls /mobile/queue/flush.
+ *
+ * The in-memory Map is a hot cache only. Every item is also persisted to
+ * PostgreSQL (source of truth) and mirrored to Redis so that a flush request
+ * handled by a different cluster instance can still see and process it.
+ * See issue #1376.
  */
 class OfflineQueue {
   constructor() {
     // userId -> ordered array of queued transactions
     this.queues = new Map();
+    // Durability can be disabled in tests / degraded environments.
+    this.persistenceEnabled = true;
+    this.redis = createRedisBackend(process.env.REDIS_URL);
+    this._redisReady = null;
+  }
+
+  async _redisClient() {
+    if (!this.persistenceEnabled) return null;
+    try {
+      this._redisReady ??= this.redis.connect();
+      await this._redisReady;
+      return this.redis;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Persist a newly enqueued item to PostgreSQL (best-effort). */
+  async _persistEnqueue(item) {
+    if (!this.persistenceEnabled) return;
+    try {
+      await prisma.mobileOfflineQueueItem.create({
+        data: {
+          id: item.id,
+          userId: item.userId,
+          transactionData: item.transaction,
+          status: item.status,
+          enqueuedAt: item.enqueuedAt,
+        },
+      });
+    } catch (err) {
+      logger.warn('offlineQueue.persist.enqueue.failed', {
+        userId: item.userId,
+        error: err.message,
+      });
+    }
+    await this._mirrorToRedis(item.userId);
+  }
+
+  /** Mirror the in-memory queue to Redis for fast cross-instance reads. */
+  async _mirrorToRedis(userId) {
+    const client = await this._redisClient();
+    if (!client) return;
+    try {
+      await client.set(
+        `${REDIS_QUEUE_PREFIX}${userId}`,
+        this.getQueue(userId),
+        REDIS_QUEUE_TTL_SECONDS,
+      );
+    } catch (err) {
+      logger.warn('offlineQueue.redis.mirror.failed', { userId, error: err.message });
+    }
+  }
+
+  /**
+   * Load pending items for a user from PostgreSQL into the in-memory cache.
+   * Adds any items not already present. Idempotent and safe to call on every
+   * flush so any cluster node can process a user's queue.
+   */
+  async hydrate(userId) {
+    if (!this.persistenceEnabled) return this.getQueue(userId);
+
+    let rows = [];
+    try {
+      rows = await prisma.mobileOfflineQueueItem.findMany({
+        where: { userId, status: 'pending' },
+        orderBy: { enqueuedAt: 'asc' },
+      });
+    } catch (err) {
+      logger.warn('offlineQueue.hydrate.failed', { userId, error: err.message });
+      return this.getQueue(userId);
+    }
+
+    const queue = this.queues.get(userId) || [];
+    const known = new Set(queue.map((i) => i.id));
+    for (const row of rows) {
+      if (known.has(row.id)) continue;
+      known.add(row.id);
+      queue.push({
+        id: row.id,
+        userId: row.userId,
+        transaction: row.transactionData,
+        enqueuedAt: row.enqueuedAt,
+        status: row.status,
+        result: row.result ?? null,
+        processedAt: row.processedAt ?? null,
+      });
+    }
+    queue.sort((a, b) => new Date(a.enqueuedAt) - new Date(b.enqueuedAt));
+    this.queues.set(userId, queue);
+    return queue;
   }
 
   enqueue(userId, transaction) {
+    validatePayloadSize(transaction);
+
     if (!this.queues.has(userId)) this.queues.set(userId, []);
+    const pendingCount = this.queues
+      .get(userId)
+      .filter((i) => i.status === 'pending').length;
+    if (pendingCount >= MAX_OFFLINE_QUEUE_ITEMS) {
+      const err = new Error(
+        `Offline queue limit reached (max ${MAX_OFFLINE_QUEUE_ITEMS} items)`,
+      );
+      err.code = 'OFFLINE_QUEUE_LIMIT_EXCEEDED';
+      throw err;
+    }
+
     const item = {
       id: crypto.randomUUID(),
       userId,
@@ -24,11 +161,34 @@ class OfflineQueue {
       status: 'pending',
     };
     this.queues.get(userId).push(item);
+    // Fire-and-forget durable write; memory queue remains the fast path.
+    Promise.resolve(this._persistEnqueue(item)).catch(() => {});
     return item;
   }
 
   getQueue(userId) {
     return this.queues.get(userId) || [];
+  }
+
+  async _persistStatus(item) {
+    if (!this.persistenceEnabled) return;
+    try {
+      await prisma.mobileOfflineQueueItem.update({
+        where: { id: item.id },
+        data: {
+          status: item.status,
+          result: item.result ?? null,
+          error: item.result?.error ?? null,
+          processedAt: item.processedAt ?? null,
+        },
+      });
+    } catch (err) {
+      logger.warn('offlineQueue.persist.status.failed', {
+        userId: item.userId,
+        error: err.message,
+      });
+    }
+    await this._mirrorToRedis(item.userId);
   }
 
   /** Mark an item as processed (success or failed) */
@@ -39,6 +199,7 @@ class OfflineQueue {
     item.status = status;
     item.result = result;
     item.processedAt = new Date();
+    Promise.resolve(this._persistStatus(item)).catch(() => {});
     return item;
   }
 
@@ -47,6 +208,13 @@ class OfflineQueue {
     const queue = this.queues.get(userId) || [];
     const pending = queue.filter(i => i.status === 'pending');
     this.queues.set(userId, pending);
+    if (this.persistenceEnabled) {
+      Promise.resolve(
+        prisma.mobileOfflineQueueItem
+          .deleteMany({ where: { userId, status: { not: 'pending' } } })
+          .then(() => this._mirrorToRedis(userId)),
+      ).catch(() => {});
+    }
     return { removed: queue.length - pending.length };
   }
 
@@ -128,6 +296,10 @@ class OfflineQueue {
     const submitPayment = deps.submitPayment || StellarService.sendPayment.bind(StellarService);
     const loadAccount =
       deps.loadAccount || ((publicKey) => horizonServer.loadAccount(publicKey));
+
+    // Rehydrate from PostgreSQL so any cluster instance can flush this user's
+    // queue, even if it was enqueued on a different node (issue #1376).
+    await this.hydrate(userId);
 
     const pending = this.getQueue(userId).filter(i => i.status === 'pending');
     const results = [];
@@ -260,4 +432,5 @@ class OfflineQueue {
   }
 }
 
+export { OfflineQueue };
 export default new OfflineQueue();

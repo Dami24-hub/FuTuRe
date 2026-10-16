@@ -14,8 +14,20 @@ import {
   verifyAuthentication,
 } from '../mobile/webAuthn.js';
 import * as StellarService from '../services/stellar.js';
+import { ipKeyGenerator } from 'express-rate-limit';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
+
+// Throttle offline-queue writes per authenticated mobile user to prevent
+// queue-flooding memory exhaustion (issue #1378).
+const offlineQueueLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: 60,
+  message: 'Too many offline queue requests, please try again later.',
+  keyGenerator: (req) =>
+    req.mobile?.userId ? `mobile:${req.mobile.userId}` : ipKeyGenerator(req.ip),
+});
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 function requireMobileAuth(req, res, next) {
@@ -188,11 +200,17 @@ router.delete('/sessions', requireMobileAuth, async (req, res) => {
 // ─── Offline Queue ────────────────────────────────────────────────────────────
 
 /** POST /api/mobile/queue  — enqueue a transaction while offline */
-router.post('/queue', requireMobileAuth, (req, res) => {
+router.post('/queue', requireMobileAuth, offlineQueueLimiter, (req, res) => {
   try {
     const item = offlineQueue.enqueue(req.mobile.userId, req.body.transaction);
     res.json(item);
   } catch (e) {
+    if (e.code === 'OFFLINE_QUEUE_LIMIT_EXCEEDED') {
+      return res.status(429).json({ error: e.message, code: e.code });
+    }
+    if (e.code === 'OFFLINE_QUEUE_PAYLOAD_TOO_LARGE') {
+      return res.status(413).json({ error: e.message, code: e.code });
+    }
     res.status(400).json({ error: e.message });
   }
 });
