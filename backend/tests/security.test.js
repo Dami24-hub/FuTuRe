@@ -19,6 +19,9 @@ import { securityHeaders, helmetMiddleware, cspNonceMiddleware } from '../src/mi
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '../data');
 
+const { createSecurityRouter } = await import('../src/routes/security.js');
+const { auditLogger: routeAuditLogger } = await import('../src/security/index.js');
+
 async function cleanup() {
   try {
     await fs.rm(DATA_DIR, { recursive: true, force: true });
@@ -333,5 +336,133 @@ describe('Security headers middleware', () => {
   it('sets Strict-Transport-Security on API responses', async () => {
     const res = await request(securedApp).get('/ping');
     expect(res.headers['strict-transport-security']).toBeDefined();
+  });
+});
+
+function buildSecurityApp({ user, stepUp = true } = {}) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.user = user;
+    next();
+  });
+  app.use(
+    '/api/security',
+    createSecurityRouter({
+      requireAuth: (req, res, next) => {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        return next();
+      },
+      requireRole: (roles) => (req, res, next) => {
+        if (!req.user || !roles.includes(req.user.role)) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
+        return next();
+      },
+      requireStepUpAuth: (req, res, next) => {
+        if (!stepUp || !req.user?.stepUpVerified) {
+          return res.status(403).json({ error: 'Step-up authentication required' });
+        }
+        return next();
+      }
+    })
+  );
+  return app;
+}
+
+describe('Emergency playbook RBAC enforcement', () => {
+  beforeEach(async () => {
+    await cleanup();
+    await routeAuditLogger.initialize();
+  });
+
+  afterEach(async () => {
+    await cleanup();
+  });
+
+  it('returns 403 for a standard authenticated user executing a playbook', async () => {
+    const app = buildSecurityApp({
+      user: { id: 'user-1', role: 'USER', stepUpVerified: true }
+    });
+    const res = await request(app)
+      .post('/api/security/incidents/incident-1/playbook/execute')
+      .send({ action: 'ISOLATE_SYSTEM' });
+    expect(res.status).toBe(403);
+  });
+
+  it('returns 403 for a standard authenticated user triggering an incident action', async () => {
+    const app = buildSecurityApp({
+      user: { id: 'user-1', role: 'USER', stepUpVerified: true }
+    });
+    const res = await request(app)
+      .post('/api/security/incidents/incident-1/actions')
+      .send({ action: 'REVOKE_ALL_SESSIONS' });
+    expect(res.status).toBe(403);
+  });
+
+  it('returns 403 for SUPER_ADMIN without step-up MFA', async () => {
+    const app = buildSecurityApp({
+      user: { id: 'admin-1', role: 'SUPER_ADMIN', stepUpVerified: false }
+    });
+    const res = await request(app)
+      .post('/api/security/incidents/incident-1/playbook/execute')
+      .send({ action: 'ISOLATE_SYSTEM' });
+    expect(res.status).toBe(403);
+  });
+
+  it('allows SUPER_ADMIN with valid step-up MFA to execute a playbook', async () => {
+    const app = buildSecurityApp({
+      user: { id: 'admin-1', role: 'SUPER_ADMIN', stepUpVerified: true }
+    });
+    const res = await request(app)
+      .post('/api/security/incidents/incident-1/playbook/execute')
+      .send({ action: 'ISOLATE_SYSTEM' });
+    expect(res.status).toBeLessThan(400);
+  });
+
+  it('allows SECURITY_LEAD with valid step-up MFA to execute a playbook', async () => {
+    const app = buildSecurityApp({
+      user: { id: 'lead-1', role: 'SECURITY_LEAD', stepUpVerified: true }
+    });
+    const res = await request(app)
+      .post('/api/security/incidents/incident-1/playbook/execute')
+      .send({ action: 'REVOKE_ALL_SESSIONS' });
+    expect(res.status).toBeLessThan(400);
+  });
+
+  it('writes denied execution attempts to the admin audit log', async () => {
+    const app = buildSecurityApp({
+      user: { id: 'user-1', role: 'USER', stepUpVerified: true }
+    });
+    await request(app)
+      .post('/api/security/incidents/incident-1/playbook/execute')
+      .send({ action: 'ISOLATE_SYSTEM' });
+    const logs = await routeAuditLogger.getAuditLog();
+    const denied = logs.filter(
+      (entry) =>
+        entry.userId === 'user-1' &&
+        (entry.eventType === 'PLAYBOOK_EXECUTION_DENIED' ||
+          entry.eventType === 'UNAUTHORIZED_ACCESS')
+    );
+    expect(denied.length).toBeGreaterThan(0);
+  });
+
+  it('writes allowed execution attempts to the admin audit log', async () => {
+    const app = buildSecurityApp({
+      user: { id: 'admin-1', role: 'SUPER_ADMIN', stepUpVerified: true }
+    });
+    await request(app)
+      .post('/api/security/incidents/incident-1/playbook/execute')
+      .send({ action: 'ISOLATE_SYSTEM' });
+    const logs = await routeAuditLogger.getAuditLog();
+    const allowed = logs.filter(
+      (entry) =>
+        entry.userId === 'admin-1' &&
+        (entry.eventType === 'PLAYBOOK_EXECUTION' ||
+          entry.eventType === 'PLAYBOOK_EXECUTED')
+    );
+    expect(allowed.length).toBeGreaterThan(0);
   });
 });

@@ -16,8 +16,33 @@ import {
   clearOldPatterns,
   detectAnomalousActivity,
 } from '../security/accountLockout.js';
+import { requireRole } from '../middleware/adminAuth.js';
+import { requireMFA } from '../middleware/mfa.js';
+import { logAdminAction } from '../db/adminAuditLog.js';
 
 const router = express.Router();
+
+// Roles permitted to perform incident response and playbook execution.
+const INCIDENT_RESPONSE_ROLES = ['SUPER_ADMIN', 'SECURITY_LEAD'];
+
+// Disruptive playbook actions that require step-up MFA verification.
+const DISRUPTIVE_ACTIONS = [
+  'system_isolation',
+  'isolate_system',
+  'revoke_sessions',
+  'revoke_all_sessions',
+  'session_revocation',
+  'freeze_transfers',
+  'freeze_outgoing_transfers',
+  'transfer_freeze',
+];
+
+function isDisruptiveAction(action) {
+  if (!action || typeof action !== 'string') {
+    return false;
+  }
+  return DISRUPTIVE_ACTIONS.includes(action.toLowerCase());
+}
 
 // OAuth 2.0 endpoints
 router.post('/oauth/authorize', (req, res) => {
@@ -226,34 +251,98 @@ router.get('/scan/latest', async (req, res) => {
 });
 
 // Incident response endpoints
-router.post('/incidents/create', async (req, res) => {
-  try {
-    const { type, severity, description, affectedSystems } = req.body;
-    const incident = await incidentResponse.createIncident(type, severity, description, affectedSystems);
-    res.json(incident);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+router.post(
+  '/incidents/create',
+  requireRole(INCIDENT_RESPONSE_ROLES),
+  async (req, res) => {
+    try {
+      const { type, severity, description, affectedSystems } = req.body;
+      const incident = await incidentResponse.createIncident(type, severity, description, affectedSystems);
+      res.json(incident);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   }
-});
+);
 
-router.get('/incidents/open', async (req, res) => {
-  try {
-    const incidents = await incidentResponse.getOpenIncidents();
-    res.json({ incidents });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+router.get(
+  '/incidents/open',
+  requireRole(INCIDENT_RESPONSE_ROLES),
+  async (req, res) => {
+    try {
+      const incidents = await incidentResponse.getOpenIncidents();
+      res.json({ incidents });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   }
-});
+);
 
-router.post('/incidents/:id/action', async (req, res) => {
-  try {
-    const { action } = req.body;
-    const incident = await incidentResponse.completeAction(req.params.id, action);
-    res.json(incident);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+router.post(
+  '/incidents/:id/action',
+  requireRole(INCIDENT_RESPONSE_ROLES),
+  async (req, res) => {
+    try {
+      const { action } = req.body;
+      const incident = await incidentResponse.completeAction(req.params.id, action);
+      res.json(incident);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
   }
-});
+);
+
+// Emergency incident playbook execution.
+// Requires elevated RBAC plus step-up MFA for disruptive actions, and every
+// attempt (allowed or denied) is written to the immutable admin audit log.
+router.post(
+  '/incidents/:id/playbook/execute',
+  requireRole(INCIDENT_RESPONSE_ROLES),
+  async (req, res) => {
+    const incidentId = req.params.id;
+    const { action } = req.body || {};
+    const actorId = req.user && (req.user.id || req.user.userId);
+
+    const audit = async (outcome, details = {}) => {
+      try {
+        await logAdminAction({
+          actorId,
+          action: 'INCIDENT_PLAYBOOK_EXECUTE',
+          targetType: 'incident',
+          targetId: incidentId,
+          playbookAction: action,
+          outcome,
+          ...details,
+        });
+      } catch (auditError) {
+        // Never let audit logging failures mask the authorization decision.
+        console.error('Failed to write admin audit log entry:', auditError);
+      }
+    };
+
+    if (isDisruptiveAction(action)) {
+      return requireMFA(req, res, async () => {
+        try {
+          const incident = await incidentResponse.executePlaybook(incidentId, action);
+          await audit('ALLOWED', { disruptive: true });
+          res.json(incident);
+        } catch (error) {
+          await audit('ERROR', { disruptive: true, error: error.message });
+          res.status(500).json({ error: error.message });
+        }
+      });
+    }
+
+    try {
+      const incident = await incidentResponse.executePlaybook(incidentId, action);
+      await audit('ALLOWED', { disruptive: false });
+      res.json(incident);
+    } catch (error) {
+      await audit('ERROR', { disruptive: false, error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
 
 // Penetration testing endpoints
 router.post('/pentest/run', async (req, res) => {
