@@ -124,6 +124,31 @@ describe('Chaos Engineering', () => {
       databaseFailureSimulator.failDatabase('db-1');
       expect(databaseFailureSimulator.isDatabaseFailed('db-1')).toBe(true);
     });
+
+    it('should track scheduled recovery timers and clear them via reset()', () => {
+      databaseFailureSimulator.reset();
+      databaseFailureSimulator.failDatabase('db-timer', 'CONNECTION_TIMEOUT', 10000);
+
+      expect(databaseFailureSimulator.activeTimers.size).toBe(1);
+
+      databaseFailureSimulator.reset();
+
+      expect(databaseFailureSimulator.activeTimers.size).toBe(0);
+      expect(databaseFailureSimulator.isDatabaseFailed('db-timer')).toBe(false);
+    });
+
+    it('should not fire cleared recovery timers after reset()', async () => {
+      databaseFailureSimulator.reset();
+      databaseFailureSimulator.failDatabase('db-timer-2', 'CONNECTION_TIMEOUT', 20);
+
+      databaseFailureSimulator.reset();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(databaseFailureSimulator.isDatabaseFailed('db-timer-2')).toBe(false);
+
+      databaseFailureSimulator.reset();
+    });
   });
 
   describe('RecoveryTimeAnalyzer', () => {
