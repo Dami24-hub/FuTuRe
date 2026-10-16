@@ -7,6 +7,9 @@ import { maybeDecryptEnvValue } from './secrets.js';
 
 export const CONFIG_SCHEMA_VERSION = 1;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+
 const emitter = new EventEmitter();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -55,6 +58,18 @@ function scheduleReload() {
     }
   }, 150);
   reloadTimer.unref?.();
+}
+
+export const LOCAL_APP_ENVS = new Set(['development', 'test']);
+export const RECOGNIZED_APP_ENVS = ['development', 'test', 'staging', 'production'];
+export const DEFAULT_JWT_SECRET_LITERAL = 'secret';
+
+function isLocalAppEnv(appEnv) {
+  return LOCAL_APP_ENVS.has(appEnv);
+}
+
+function requiresDeployedSecrets(appEnv) {
+  return !isLocalAppEnv(appEnv);
 }
 
 function normalizeAppEnv(value) {
@@ -192,9 +207,9 @@ function parseStellarNetwork(raw, { appEnv, envVarName }) {
   const normalized = value.toLowerCase();
 
   if (normalized === 'public') return 'mainnet';
-  if (normalized === 'mainnet' || normalized === 'testnet') return normalized;
+  if (normalized === 'mainnet' || normalized === 'testnet' || normalized === 'futurenet') return normalized;
 
-  throw new Error(`${envVarName} must be "testnet" or "mainnet"`);
+  throw new Error(`${envVarName} must be "testnet", "futurenet", or "mainnet"`);
 }
 
 function assertValidPort(port, { envVarName }) {
@@ -272,7 +287,11 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
   });
 
   const defaultHorizonUrl =
-    stellarNetwork === 'testnet' ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org';
+    stellarNetwork === 'testnet'
+      ? 'https://horizon-testnet.stellar.org'
+      : stellarNetwork === 'futurenet'
+        ? 'https://horizon-futurenet.stellar.org'
+        : 'https://horizon.stellar.org';
 
   const horizonUrl = maybeDecryptEnvValue(env.HORIZON_URL ?? defaultHorizonUrl, encryptionKey, {
     envVarName: 'HORIZON_URL',
@@ -286,7 +305,11 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
       : undefined;
 
   const defaultSorobanRpcUrl =
-    stellarNetwork === 'testnet' ? 'https://soroban-testnet.stellar.org' : 'https://mainnet.sorobanrpc.com';
+    stellarNetwork === 'testnet'
+      ? 'https://soroban-testnet.stellar.org'
+      : stellarNetwork === 'futurenet'
+        ? 'https://rpc-futurenet.stellar.org'
+        : 'https://mainnet.sorobanrpc.com';
 
   const sorobanRpcUrl = maybeDecryptEnvValue(env.SOROBAN_RPC_URL ?? defaultSorobanRpcUrl, encryptionKey, {
     envVarName: 'SOROBAN_RPC_URL',
@@ -318,23 +341,37 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
   const allowedOrigins =
     allowedOriginsFromEnv.length > 0 ? allowedOriginsFromEnv : allowedOriginsDefault;
 
-  const validAppEnvs = ['development', 'test', 'staging', 'production'];
-  if (!validAppEnvs.includes(resolvedAppEnv)) {
-    throw new Error(`APP_ENV must be one of: ${validAppEnvs.join(', ')}`);
-  }
+  // Unrecognized APP_ENV values (preprod, demo, typos) are allowed to boot
+  // but are treated as deployed: fail-closed on secrets rather than falling
+  // back to development defaults. Recognized values: development, test,
+  // staging, production.
 
-  if ((resolvedAppEnv === 'production' || resolvedAppEnv === 'staging') && allowedOriginsFromEnv.length === 0) {
+  if (requiresDeployedSecrets(resolvedAppEnv) && allowedOriginsFromEnv.length === 0) {
     throw new Error('ALLOWED_ORIGINS is required in production and staging');
   }
 
   const jwtSecretRaw =
-    typeof env.JWT_SECRET === 'string' ? env.JWT_SECRET : (resolvedAppEnv === 'production' || resolvedAppEnv === 'staging') ? '' : 'secret';
+    typeof env.JWT_SECRET === 'string'
+      ? env.JWT_SECRET
+      : isLocalAppEnv(resolvedAppEnv)
+        ? DEFAULT_JWT_SECRET_LITERAL
+        : '';
   const jwtSecret = maybeDecryptEnvValue(jwtSecretRaw, encryptionKey, { envVarName: 'JWT_SECRET' });
-  if (resolvedAppEnv === 'production' || resolvedAppEnv === 'staging') {
+  if (requiresDeployedSecrets(resolvedAppEnv)) {
     const secret = requiredString(jwtSecret, { envVarName: 'JWT_SECRET' });
-    if (secret === 'secret') {
+    if (secret === DEFAULT_JWT_SECRET_LITERAL) {
       throw new Error('JWT_SECRET must not be the default value in production or staging');
     }
+  }
+
+  // Separate access/refresh secrets allow independent rotation; fall back to JWT_SECRET.
+  const jwtAccessSecret =
+    maybeDecryptEnvValue(env.JWT_ACCESS_SECRET, encryptionKey, { envVarName: 'JWT_ACCESS_SECRET' }) || jwtSecret;
+  const jwtRefreshSecret =
+    maybeDecryptEnvValue(env.JWT_REFRESH_SECRET, encryptionKey, { envVarName: 'JWT_REFRESH_SECRET' }) ||
+    (jwtSecret ? `${jwtSecret}:refresh` : jwtSecret);
+  if (resolvedAppEnv === 'production' && env.JWT_ACCESS_SECRET && env.JWT_ACCESS_SECRET === env.JWT_REFRESH_SECRET) {
+    throw new Error('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must differ');
   }
 
   const watchFlag = parseBoolean(env.CONFIG_WATCH);
@@ -351,6 +388,9 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
   const alertEmail = env.ALERT_EMAIL ? (typeof env.ALERT_EMAIL === 'string' ? env.ALERT_EMAIL.trim() : '') : undefined;
   const slackWebhookUrl = env.SLACK_WEBHOOK_URL ? (typeof env.SLACK_WEBHOOK_URL === 'string' ? env.SLACK_WEBHOOK_URL.trim() : '') : undefined;
 
+  const emailFrom = trimOrUndefined(env.EMAIL_FROM) ?? 'noreply@futureremit.app';
+  const dkim = resolveDkimConfig(env);
+
   // Default XLM amount above which the frontend requires a WebAuthn
   // biometric re-auth before a payment is confirmed (see issue #808).
   // Operators can raise/lower the sane default; users may further
@@ -361,6 +401,16 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
   });
   if (biometricReauthThresholdXLM <= 0) {
     throw new Error('BIOMETRIC_REAUTH_THRESHOLD_XLM must be a positive number');
+  }
+
+  // Max consecutive stream payment failures before marking a stream FAILED.
+  // Documented default is 5; override via STREAM_MAX_CONSECUTIVE_FAILURES.
+  const streamMaxConsecutiveFailures = parseInteger(env.STREAM_MAX_CONSECUTIVE_FAILURES, {
+    envVarName: 'STREAM_MAX_CONSECUTIVE_FAILURES',
+    defaultValue: 5,
+  });
+  if (!Number.isInteger(streamMaxConsecutiveFailures) || streamMaxConsecutiveFailures < 1) {
+    throw new Error('STREAM_MAX_CONSECUTIVE_FAILURES must be a positive integer');
   }
 
   return {
@@ -392,6 +442,12 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
     },
     security: {
       jwtSecret,
+      jwtAccessSecret,
+      jwtRefreshSecret,
+    },
+    database: {
+      url: env.DATABASE_URL,
+      readUrl: env.DATABASE_READ_URL || env.DATABASE_URL,
       biometricReauthThresholdXLM,
     },
     database: {
@@ -401,5 +457,118 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
       email: alertEmail,
       slackWebhookUrl,
     },
+    email: {
+      from: emailFrom,
+      dkim,
+    },
+    aml: {
+      largeThreshold: parseFloatEnv(env.AML_LARGE_TX_THRESHOLD, {
+        envVarName: 'AML_LARGE_TX_THRESHOLD',
+        defaultValue: 10000,
+      }),
+      structuringThreshold: parseFloatEnv(env.AML_STRUCTURING_THRESHOLD, {
+        envVarName: 'AML_STRUCTURING_THRESHOLD',
+        defaultValue: 1000,
+      }),
+      structuringCount: parseInteger(env.AML_STRUCTURING_COUNT, {
+        envVarName: 'AML_STRUCTURING_COUNT',
+        defaultValue: 3,
+      }),
+      velocityLimit: parseFloatEnv(env.AML_VELOCITY_LIMIT, {
+        envVarName: 'AML_VELOCITY_LIMIT',
+        defaultValue: 10000,
+      }),
+      rapidTxCount: parseInteger(env.AML_RAPID_TX_COUNT, {
+        envVarName: 'AML_RAPID_TX_COUNT',
+        defaultValue: 5,
+      }),
+      rapidTxWindowMs: parseInteger(env.AML_RAPID_TX_WINDOW_MS, {
+        envVarName: 'AML_RAPID_TX_WINDOW_MS',
+        defaultValue: HOUR_MS,
+      }),
+      nearThresholdLow: parseFloatEnv(env.AML_NEAR_THRESHOLD_LOW, {
+        envVarName: 'AML_NEAR_THRESHOLD_LOW',
+        defaultValue: 9000,
+      }),
+      sanctionsApiKey: env.SANCTIONS_API_KEY || '',
+      sanctionsApiUrl: env.SANCTIONS_API_URL || 'https://api.ofac-api.com/v4/search',
+      sanctionsMinScore: parseInteger(env.SANCTIONS_MIN_SCORE, {
+        envVarName: 'SANCTIONS_MIN_SCORE',
+        defaultValue: 85,
+      }),
+    },
+    backup: {
+      encryptionKey: env.BACKUP_ENC_KEY || '',
+      encryptionKeyPrevious: env.BACKUP_ENC_KEY_PREVIOUS || '',
+      directory: env.BACKUP_DIR || './backups',
+      intervalHours: parseInteger(env.BACKUP_INTERVAL_HOURS, {
+        envVarName: 'BACKUP_INTERVAL_HOURS',
+        defaultValue: 24,
+      }),
+      retentionDays: parseInteger(env.BACKUP_RETENTION_DAYS, {
+        envVarName: 'BACKUP_RETENTION_DAYS',
+        defaultValue: 30,
+      }),
+    },
+    cache: {
+      ttlBalanceSeconds: parseInteger(env.CACHE_TTL_BALANCE_S, {
+        envVarName: 'CACHE_TTL_BALANCE_S',
+        defaultValue: 300,
+      }),
+      ttlFeeSeconds: parseInteger(env.CACHE_TTL_FEE_S, {
+        envVarName: 'CACHE_TTL_FEE_S',
+        defaultValue: 3600,
+      }),
+    },
+    cdn: {
+      enabled: parseBoolean(env.CDN_ENABLED),
+      url: env.CDN_URL || '',
+      secondaryUrl: env.CDN_SECONDARY_URL || '',
+      regions: parseCsv(env.CDN_REGIONS),
+      cacheMaxAgeSeconds: parseInteger(env.CDN_CACHE_MAX_AGE_S, {
+        envVarName: 'CDN_CACHE_MAX_AGE_S',
+        defaultValue: 86400,
+      }),
+    },
+    crypto: {
+      databaseEncryptionKey: env.DATABASE_ENCRYPTION_KEY || '',
+    },
+    mobile: {
+      webauthnRpId: env.WEBAUTHN_RP_ID || 'future.app',
+      jwtSecret: env.MOBILE_JWT_SECRET || env.JWT_SECRET || '',
+    },
+    streaming: {
+      maxConsecutiveFailures: streamMaxConsecutiveFailures,
+    },
   };
+}
+
+function trimOrUndefined(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * DKIM signing config for outbound email. All three variables must be set
+ * together; a partial configuration is a deployment mistake and fails fast.
+ * DKIM_PRIVATE_KEY may be a PEM with literal "\n" sequences (single-line env).
+ */
+function resolveDkimConfig(env) {
+  const domainName = trimOrUndefined(env.DKIM_DOMAIN);
+  const keySelector = trimOrUndefined(env.DKIM_KEY_SELECTOR);
+  const rawKey = trimOrUndefined(env.DKIM_PRIVATE_KEY);
+
+  const provided = [domainName, keySelector, rawKey].filter(Boolean).length;
+  if (provided === 0) return null;
+  if (provided !== 3) {
+    throw new Error('DKIM_DOMAIN, DKIM_KEY_SELECTOR and DKIM_PRIVATE_KEY must all be set to enable DKIM signing');
+  }
+
+  const privateKey = rawKey.replace(/\\n/g, '\n');
+  if (!/-----BEGIN (RSA )?PRIVATE KEY-----/.test(privateKey)) {
+    throw new Error('DKIM_PRIVATE_KEY must be a PEM-encoded private key');
+  }
+
+  return { domainName, keySelector, privateKey };
 }

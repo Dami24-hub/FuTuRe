@@ -28,6 +28,25 @@ resource "aws_iam_role" "rds_monitoring" {
 resource "aws_iam_role_policy_attachment" "rds_monitoring" {
   role       = aws_iam_role.rds_monitoring.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+# ── RDS Parameter Group ──────────────────────────────────────────────────────
+# Enforce a server-wide default statement_timeout so runaway queries are
+# cancelled even when a connection (e.g. via PgBouncer transaction pooling)
+# does not carry the client-side startup option.
+
+resource "aws_db_parameter_group" "postgres" {
+  name        = "${local.name_prefix}-postgres16"
+  family      = "postgres16"
+  description = "FuTuRe PostgreSQL parameters (statement_timeout enforcement)."
+
+  parameter {
+    name         = "statement_timeout"
+    value        = "5000"
+    apply_method = "immediate"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # ── RDS PostgreSQL ────────────────────────────────────────────────────────────
@@ -49,6 +68,7 @@ resource "aws_db_instance" "postgres" {
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
+  parameter_group_name   = aws_db_parameter_group.postgres.name
 
   backup_retention_period = var.db_backup_retention_days
   backup_window           = "03:00-04:00"

@@ -14,8 +14,20 @@ import {
   verifyAuthentication,
 } from '../mobile/webAuthn.js';
 import * as StellarService from '../services/stellar.js';
+import { ipKeyGenerator } from 'express-rate-limit';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
+
+// Throttle offline-queue writes per authenticated mobile user to prevent
+// queue-flooding memory exhaustion (issue #1378).
+const offlineQueueLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: 60,
+  message: 'Too many offline queue requests, please try again later.',
+  keyGenerator: (req) =>
+    req.mobile?.userId ? `mobile:${req.mobile.userId}` : ipKeyGenerator(req.ip),
+});
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 function requireMobileAuth(req, res, next) {
@@ -91,20 +103,19 @@ router.post('/auth/biometric/verify', (req, res) => {
  * Phase 1 (no credential in body): returns registration options.
  * Phase 2 (credential in body):    verifies and persists credential in DB.
  */
-router.post('/auth/webauthn/register', (req, res) => {
+router.post('/auth/webauthn/register', async (req, res) => {
   try {
     const { userId, username, challengeId, credential, deviceName } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId is required' });
 
     if (!challengeId) {
       // Phase 1 — return options for navigator.credentials.create()
-      return res.json(generateRegistrationOptions(userId, username));
+      return res.json(await generateRegistrationOptions(userId, username));
     }
 
     // Phase 2 — store the credential
-    verifyAndStoreRegistration(challengeId, credential, deviceName)
-      .then((result) => res.status(201).json(result))
-      .catch((e) => res.status(400).json({ error: e.message }));
+    const result = await verifyAndStoreRegistration(challengeId, credential, deviceName);
+    res.status(201).json(result);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -164,36 +175,42 @@ router.post('/notifications/send', requireMobileAuth, async (req, res) => {
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 
 /** POST /api/mobile/sessions */
-router.post('/sessions', requireMobileAuth, (req, res) => {
-  const sessionId = mobileSessions.create(req.mobile.userId, req.mobile.deviceId, req.body.metadata);
+router.post('/sessions', requireMobileAuth, async (req, res) => {
+  const sessionId = await mobileSessions.create(req.mobile.userId, req.mobile.deviceId, req.body.metadata);
   res.json({ sessionId });
 });
 
 /** GET /api/mobile/sessions */
-router.get('/sessions', requireMobileAuth, (req, res) => {
-  res.json(mobileSessions.listForUser(req.mobile.userId));
+router.get('/sessions', requireMobileAuth, async (req, res) => {
+  res.json(await mobileSessions.listForUser(req.mobile.userId));
 });
 
 /** DELETE /api/mobile/sessions/:sessionId */
-router.delete('/sessions/:sessionId', requireMobileAuth, (req, res) => {
-  mobileSessions.revoke(req.params.sessionId);
+router.delete('/sessions/:sessionId', requireMobileAuth, async (req, res) => {
+  await mobileSessions.revoke(req.params.sessionId);
   res.json({ revoked: true });
 });
 
 /** DELETE /api/mobile/sessions */
-router.delete('/sessions', requireMobileAuth, (req, res) => {
-  const count = mobileSessions.revokeAll(req.mobile.userId);
+router.delete('/sessions', requireMobileAuth, async (req, res) => {
+  const count = await mobileSessions.revokeAll(req.mobile.userId);
   res.json({ revoked: count });
 });
 
 // ─── Offline Queue ────────────────────────────────────────────────────────────
 
 /** POST /api/mobile/queue  — enqueue a transaction while offline */
-router.post('/queue', requireMobileAuth, (req, res) => {
+router.post('/queue', requireMobileAuth, offlineQueueLimiter, (req, res) => {
   try {
     const item = offlineQueue.enqueue(req.mobile.userId, req.body.transaction);
     res.json(item);
   } catch (e) {
+    if (e.code === 'OFFLINE_QUEUE_LIMIT_EXCEEDED') {
+      return res.status(429).json({ error: e.message, code: e.code });
+    }
+    if (e.code === 'OFFLINE_QUEUE_PAYLOAD_TOO_LARGE') {
+      return res.status(413).json({ error: e.message, code: e.code });
+    }
     res.status(400).json({ error: e.message });
   }
 });
@@ -203,25 +220,15 @@ router.get('/queue', requireMobileAuth, (req, res) => {
   res.json(offlineQueue.getQueue(req.mobile.userId));
 });
 
-/** POST /api/mobile/queue/flush — process all pending queued transactions */
+/** POST /api/mobile/queue/flush — process pending txs with sequence pre-flight */
 router.post('/queue/flush', requireMobileAuth, async (req, res) => {
-  const pending = offlineQueue.getQueue(req.mobile.userId).filter(i => i.status === 'pending');
-  const results = [];
-
-  for (const item of pending) {
-    try {
-      const { sourceSecret, destination, amount, assetCode } = item.transaction;
-      const result = await StellarService.sendPayment(sourceSecret, destination, amount, assetCode);
-      offlineQueue.updateStatus(req.mobile.userId, item.id, 'success', result);
-      results.push({ id: item.id, status: 'success', hash: result.hash });
-    } catch (e) {
-      offlineQueue.updateStatus(req.mobile.userId, item.id, 'failed', { error: e.message });
-      results.push({ id: item.id, status: 'failed', error: e.message });
-    }
+  try {
+    const outcome = await offlineQueue.flushQueue(req.mobile.userId);
+    const status = outcome.requiresResign ? 409 : 200;
+    res.status(status).json(outcome);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-
-  offlineQueue.clearProcessed(req.mobile.userId);
-  res.json({ processed: results.length, results });
 });
 
 // ─── Security ─────────────────────────────────────────────────────────────────

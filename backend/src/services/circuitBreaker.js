@@ -26,7 +26,9 @@ const STATE = { CLOSED: 'CLOSED', OPEN: 'OPEN', HALF: 'HALF_OPEN' };
  * @param {string} [name='service'] - Used only in the thrown "circuit open" error message.
  * @returns {{ call: (fn: () => Promise) => Promise, getState: () => object, reset: () => void }}
  */
-export function createCircuitBreaker(name = 'service') {
+export function createCircuitBreaker(name = 'service', options = {}) {
+  const failureThreshold = options.failureThreshold ?? FAILURE_THRESHOLD;
+  const probeIntervalMs = options.probeIntervalMs ?? PROBE_INTERVAL_MS;
   let state = STATE.CLOSED;
   let failures = 0;
   let windowStart = Date.now();
@@ -37,7 +39,7 @@ export function createCircuitBreaker(name = 'service') {
     clearTimeout(probeTimer);
     probeTimer = setTimeout(() => {
       state = STATE.HALF;
-    }, PROBE_INTERVAL_MS);
+    }, probeIntervalMs);
     // Don't keep the process alive just for the probe
     if (probeTimer.unref) probeTimer.unref();
   }
@@ -59,14 +61,13 @@ export function createCircuitBreaker(name = 'service') {
       return;
     }
     failures += 1;
-    if (failures >= FAILURE_THRESHOLD) {
+    if (failures >= failureThreshold) {
       state = STATE.OPEN;
       openedAt = now;
       scheduleProbe();
     }
   }
 
-  /** Execute fn through the circuit breaker. */
   async function call(fn) {
     if (state === STATE.OPEN) {
       const err = new Error(`${name} circuit breaker is open — service unavailable`);
@@ -76,7 +77,6 @@ export function createCircuitBreaker(name = 'service') {
 
     const wasHalf = state === STATE.HALF;
     if (wasHalf) {
-      // Only one probe allowed; re-open immediately if another call sneaks in
       state = STATE.OPEN;
       scheduleProbe();
     }
@@ -89,20 +89,8 @@ export function createCircuitBreaker(name = 'service') {
       recordFailure();
       throw err;
     }
-/**
- * Execute `fn` through the circuit breaker.
- * @param {() => Promise<any>} fn - Async operation to guard (typically a Horizon call)
- * @returns {Promise<any>} The resolved value of `fn`
- * @throws {Error} With `circuitOpen: true` if the circuit is OPEN (fn is not invoked); otherwise whatever `fn` throws
- */
-export async function callWithCircuitBreaker(fn) {
-  if (state === STATE.OPEN) {
-    const err = new Error('Horizon circuit breaker is open — service unavailable');
-    err.circuitOpen = true;
-    throw err;
   }
 
-  /** Return a snapshot of circuit state for health/monitoring. */
   function getState() {
     return {
       state,
@@ -111,7 +99,6 @@ export async function callWithCircuitBreaker(fn) {
     };
   }
 
-  /** Reset circuit (useful in tests). */
   function reset() {
     clearTimeout(probeTimer);
     state = STATE.CLOSED;
@@ -121,35 +108,4 @@ export async function callWithCircuitBreaker(fn) {
   }
 
   return { call, getState, reset };
-}
-
-// Default shared instance, kept for backward compatibility with existing
-// Horizon call sites (services/stellar.js, services/digestGenerator.js).
-const horizonBreaker = createCircuitBreaker('Horizon');
-
-export const callWithCircuitBreaker = horizonBreaker.call;
-export const getCircuitState = horizonBreaker.getState;
-export const resetCircuit = horizonBreaker.reset;
-/**
- * Return a snapshot of circuit state for health/monitoring.
- * @returns {{state: 'CLOSED'|'OPEN'|'HALF_OPEN', failures: number, openedAt: string|null}} Current circuit state
- */
-export function getCircuitState() {
-  return {
-    state,
-    failures,
-    openedAt: openedAt ? new Date(openedAt).toISOString() : null,
-  };
-}
-
-/**
- * Reset the circuit to its initial CLOSED state (useful in tests).
- * @returns {void}
- */
-export function resetCircuit() {
-  clearTimeout(probeTimer);
-  state = STATE.CLOSED;
-  failures = 0;
-  windowStart = Date.now();
-  openedAt = null;
 }

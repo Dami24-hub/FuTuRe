@@ -4,6 +4,9 @@
   "type": "module",
   "description": "Cross-border remittance platform on Stellar blockchain",
   "private": true,
+  "engines": {
+    "node": ">=20 <21"
+  },
   "workspaces": [
     "backend",
     "frontend"
@@ -51,7 +54,7 @@
     ]
   },
   "devDependencies": {
-    "acorn": "^8.16.0",
+    "acorn": "^8.11.0",
     "acorn-jsx": "^5.3.2",
     "@eslint/js": "^9.28.0",
     "@pact-foundation/pact": "^16.3.0",

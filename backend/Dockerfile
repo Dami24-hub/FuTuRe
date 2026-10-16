@@ -15,6 +15,10 @@ COPY src ./src
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
+# Pin timezone to UTC so Date arithmetic (e.g. peakHour in userBehavior.js)
+# is deterministic regardless of the host/container's default TZ setting.
+ENV TZ=UTC
+
 # Install only production deps
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
@@ -27,7 +31,9 @@ COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
 # Copy application source
 COPY --from=build /app/src ./src
 
-# Drop root privileges
+# Drop root privileges: hand ownership of the app tree to the built-in
+# non-root `node` user (UID 1000) so the process has read-only access to
+# system binaries and write access only to required scratch paths.
 RUN chown -R node:node /app
 USER node
 
