@@ -1396,11 +1396,35 @@ export async function batchCreateTrustlines(sourceSecret, assets) {
  * @returns {Promise<{hash: string, ledger: number, success: boolean}>}
  * @throws {Error} If the account has non-zero non-XLM balances or Horizon submission fails
  */
+/**
+ * Check whether an account exists on the ledger.
+ * Returns false only on a definitive Horizon 404; other errors propagate.
+ * @param {string} publicKey
+ * @returns {Promise<boolean>}
+ */
+async function accountExists(publicKey) {
+  try {
+    await withHorizonRetry(() => getHorizonServer().loadAccount(publicKey));
+    return true;
+  } catch (err) {
+    if (err?.response?.status === 404) return false;
+    throw err;
+  }
+}
+
 export async function mergeAccount(sourceSecret, destination) {
   const sourceKeypair = StellarSDK.Keypair.fromSecret(sourceSecret);
   const sourcePublicKey = sourceKeypair.publicKey();
   const correlationId = randomUUID();
   logger.info('stellar.mergeAccount.start', { source: sourcePublicKey, destination, correlationId });
+
+  // Guard against irreversible merges into a typo'd / unfunded / self address.
+  if (destination === sourcePublicKey) {
+    throw new Error('Destination must be different from the source account');
+  }
+  if (!(await accountExists(destination))) {
+    throw new Error('Destination account does not exist on the Stellar ledger');
+  }
 
   const sourceAccount = await withHorizonRetry(() =>
     getHorizonServer().loadAccount(sourcePublicKey),
@@ -1481,9 +1505,12 @@ export async function simulateMergeAccount(sourcePublicKey, destinationPublicKey
   // Get all offers for this account
   const offers = await getOpenOffers(sourcePublicKey);
 
+  const destinationExists = await accountExists(destinationPublicKey);
+
   return {
     account: sourceAccount,
     offers,
+    destinationExists,
   };
 }
 
