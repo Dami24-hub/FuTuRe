@@ -449,8 +449,6 @@ export function createConfigFromEnv(env, { appEnv, nodeEnv, loadedEnvFiles } = {
       url: env.DATABASE_URL,
       readUrl: env.DATABASE_READ_URL || env.DATABASE_URL,
       biometricReauthThresholdXLM,
-    },
-    database: {
       poolMax: dbPoolMax,
     },
     alerts: {

@@ -656,7 +656,6 @@ export async function sendPayment(
     }
   }
 
-  let result;
   const txHash = typeof txToSubmit?.hash === 'function' ? txToSubmit.hash().toString('hex') : null;
   try {
     result = await withHorizonRetry(() => getHorizonServer().submitTransaction(txToSubmit), txHash);
