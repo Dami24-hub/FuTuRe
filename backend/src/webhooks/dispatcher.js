@@ -193,7 +193,6 @@ async function deliverOnce(webhook, payload) {
     throw new Error('Webhook URL validation did not return a resolved IP address');
   }
 
-  const signature = signPayload(webhook.signingSecret, payload);
   const dispatcher = createPinnedDispatcher(target.hostname, pinnedIp);
 
   try {

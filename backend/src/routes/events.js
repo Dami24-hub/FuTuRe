@@ -9,23 +9,18 @@ import {
 } from '../eventSourcing/index.js';
 import { clampLimit } from '../eventSourcing/eventStore.js';
 import { requireAdmin } from '../middleware/adminAuth.js';
+import { requireOwnAccount } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // Event-sourcing internals (replay, projections, archival) are an
 // engineering/ops surface, not user-facing, so they are admin-only (#1102).
 router.use(requireAdmin);
-import { requireAuth, requireAdmin, requireOwnAccount } from '../middleware/auth.js';
-
-const router = express.Router();
-
-router.use(requireAuth);
 
 /**
  * @swagger
  * /api/events/history/{aggregateId}:
  *   get:
- *     summary: Get a page of event history for an aggregate
  *     summary: Get event history for an aggregate
  *     description: "Known limitation: event-sourcing state is in-memory, so it is not durable across deploys or shared across instances. See docs/guides/internal-tooling.md#event-sourcing"
  *     tags: [Events]
