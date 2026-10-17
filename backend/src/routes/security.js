@@ -45,20 +45,26 @@ function isDisruptiveAction(action) {
 }
 
 // OAuth 2.0 endpoints
-router.post('/oauth/authorize', (req, res) => {
+router.post('/oauth/authorize', async (req, res) => {
   try {
-    const { clientId, userId, scope } = req.body;
-    const code = oauth2.generateAuthorizationCode(clientId, userId, scope);
+    const { clientId, userId, scope, codeChallenge, codeChallengeMethod } = req.body;
+    const code = await oauth2.generateAuthorizationCode(
+      clientId,
+      userId,
+      scope,
+      codeChallenge,
+      codeChallengeMethod,
+    );
     res.json({ authorizationCode: code });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 });
 
-router.post('/oauth/token', (req, res) => {
+router.post('/oauth/token', async (req, res) => {
   try {
-    const { code, clientId, clientSecret } = req.body;
-    const token = oauth2.exchangeCodeForToken(code, clientId, clientSecret);
+    const { code, clientId, clientSecret, codeVerifier } = req.body;
+    const token = await oauth2.exchangeCodeForToken(code, clientId, clientSecret, codeVerifier);
     res.json(token);
   } catch (error) {
     res.status(400).json({ error: error.message });
